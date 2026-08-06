@@ -12,7 +12,8 @@ it does not call a language model or rewrite itself while the game is live.
 4. A hostile position from an old Turn is memory, not current truth.
 5. Movement and attack are mutually exclusive Unit actions. An enemy cannot move
    and attack in the same Tick.
-6. Population remains at or below 19.
+6. Normal economic growth stops at population 24 and the absolute population
+   bound is 25; the final slot is reserved for immediate emergency defense.
 7. No raid continues through local combat pressure merely because the original
    target still exists.
 

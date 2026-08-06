@@ -34,6 +34,7 @@ from arena_hero import (
     TransportError,
     Turn,
     UnitType,
+    unit_cost,
 )
 
 API_KEY_ENV = "ARENA_HERO_API_KEY"
@@ -45,17 +46,25 @@ DEFAULT_WORKER_TARGET = 12
 DEFAULT_BEACON_POLICY = "retreat"
 BASE_WORKER_TARGET = 6
 CORE_RESOURCE_RESERVE = 10
-WORKER_EXPANSION_COST = 5
 LATE_EXPANSION_RESERVE = 15
 EARLY_DEFENSE_WORKER_GOAL = 8
 EARLY_DEFENSE_RESERVE = 15
 LONG_TERM_DEFENSE_RESERVE = 15
-VANGUARD_COST = 10
-RANGER_COST = 12
+BASELINE_VANGUARD_TARGET = 3
+BASELINE_RANGER_TARGET = 4
+ECONOMIC_WORKER_LIMIT = 17
+STEADY_POPULATION_LIMIT = 24
+ABSOLUTE_POPULATION_LIMIT = 25
+EMERGENCY_VANGUARD_TARGET = 4
+EMERGENCY_RANGER_TARGET = 5
+GROWTH_WINDOW_TICKS = 32
+GROWTH_EARNBACK_MULTIPLIER = 2
+GROWTH_SPAWN_BACKOFF_TICKS = 8
+GROWTH_COOLDOWN_TICKS = GROWTH_WINDOW_TICKS
 EARLY_DEFENSE_VANGUARD_TARGET = 1
 EARLY_DEFENSE_RANGER_TARGET = 1
-DEFENSE_VANGUARD_TARGET = 3
-DEFENSE_RANGER_TARGET = 4
+DEFENSE_VANGUARD_TARGET = BASELINE_VANGUARD_TARGET
+DEFENSE_RANGER_TARGET = BASELINE_RANGER_TARGET
 MAX_WORKER_TARGET = 19 - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
 VANGUARD_GUARD_RADIUS = 3
 RANGER_GUARD_RADIUS = 2
@@ -96,7 +105,6 @@ RECOVERY_TICKS = 160
 RECOVERY_MIN_WORKERS = 6
 RECOVERY_MIN_RESOURCES = 20
 RECOVERY_THREAT_DISTANCE = 12
-RECOVERY_INFERENCE_RESOURCE_LIMIT = CORE_RESOURCE_RESERVE + WORKER_EXPANSION_COST
 LOG_SNAPSHOT_INTERVAL = 20
 PATH_COST_MAX_EXPANSIONS = 512
 PATH_COST_UNREACHABLE = 1_000_000
@@ -311,6 +319,16 @@ class ThreatAssessment:
         if self.lifecycle is LifecycleMode.RECOVERY:
             return GlobalPosture.RECOVERY
         return GlobalPosture(self.level.value)
+
+
+@dataclass(slots=True, frozen=True)
+class ProductionBudget:
+    population: int
+    resources: int
+    planned_unit_heal_cost: int
+    worker_cost: int
+    vanguard_cost: int
+    ranger_cost: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -1404,10 +1422,11 @@ def _worker_expansion_threshold(
     worker_count: int,
     worker_target: int,
     resource_capacity: int,
+    population: int,
 ) -> int:
     if worker_count < BASE_WORKER_TARGET:
         return min(
-            CORE_RESOURCE_RESERVE + WORKER_EXPANSION_COST,
+            CORE_RESOURCE_RESERVE + unit_cost(UnitType.WORKER, population),
             resource_capacity,
         )
 
@@ -1417,7 +1436,28 @@ def _worker_expansion_threshold(
         BASE_WORKER_TARGET + 2 * (completed_late_stages + 1),
     )
     remaining_stage_workers = max(1, stage_target - worker_count)
-    return LATE_EXPANSION_RESERVE + WORKER_EXPANSION_COST * remaining_stage_workers
+    stage_cost = sum(
+        unit_cost(UnitType.WORKER, population + offset)
+        for offset in range(remaining_stage_workers)
+    )
+    return LATE_EXPANSION_RESERVE + stage_cost
+
+
+def _planned_unit_heal_cost(turn: Turn) -> int:
+    """Reserve the worst legal recovery spend before choosing a Core action."""
+    units_by_id = {unit.id: unit for unit in turn.units}
+    plan = turn.plan.model_dump(mode="json", exclude_none=True)
+    cost = 0
+    for identifier, action in plan.get("unit_actions", {}).items():
+        if action.get("type") != "HEAL":
+            continue
+        try:
+            unit = units_by_id[UUID(identifier)]
+        except (KeyError, ValueError):
+            continue
+        # A surviving Unit may take more damage before post-combat healing.
+        cost += max(0, _unit_max_hp(unit.unit_type) - 1)
+    return cost
 
 
 def _uuid_sort_key(obj: object) -> bytes:
@@ -1495,6 +1535,185 @@ class CoreFarmer:
         self.stationary_unit_target_id: UUID | None = None
         self.threat_caution_until_tick = 0
         self.startup_tick: int | None = None
+        self.economic_deposit_history: deque[tuple[int, int]] = deque(
+            maxlen=GROWTH_WINDOW_TICKS * 2
+        )
+        self.economic_blocked_history: deque[tuple[int, bool]] = deque(
+            maxlen=GROWTH_WINDOW_TICKS * 2
+        )
+        self.last_optional_spawn_tick = -GROWTH_COOLDOWN_TICKS
+        self.optional_spawn_retry_until_tick = 0
+        self.pending_optional_spawn = False
+        self.pending_optional_spawn_tick: int | None = None
+        self.pending_conditional_spawn = False
+        self.pending_conditional_spawn_tick: int | None = None
+        self.conditional_spawn_retry_until_tick = 0
+
+    @property
+    def economic_growth_enabled(self) -> bool:
+        return self.worker_target == DEFAULT_WORKER_TARGET
+
+    def _refresh_economic_history(self, turn: Turn) -> None:
+        if any(
+            event.event_type in {"CORE_DESTROYED", "CORE_RESPAWNED"}
+            for event in turn.events
+        ):
+            self.economic_deposit_history.clear()
+            self.economic_blocked_history.clear()
+            self.last_optional_spawn_tick = turn.tick
+            self.pending_optional_spawn = False
+            self.pending_optional_spawn_tick = None
+            self.pending_conditional_spawn = False
+            self.pending_conditional_spawn_tick = None
+
+        if self.pending_conditional_spawn:
+            spawn_result = next(
+                (
+                    event
+                    for event in turn.events
+                    if event.event_type
+                    in {"CORE_SPAWN_SUCCEEDED", "CORE_SPAWN_FAILED"}
+                ),
+                None,
+            )
+            if spawn_result is not None:
+                self.pending_conditional_spawn = False
+                self.pending_conditional_spawn_tick = None
+                if spawn_result.event_type == "CORE_SPAWN_FAILED":
+                    self.conditional_spawn_retry_until_tick = (
+                        turn.tick + GROWTH_SPAWN_BACKOFF_TICKS
+                    )
+            elif (
+                self.pending_conditional_spawn_tick is not None
+                and turn.tick > self.pending_conditional_spawn_tick + 1
+            ):
+                self.pending_conditional_spawn = False
+                self.pending_conditional_spawn_tick = None
+                self.conditional_spawn_retry_until_tick = (
+                    turn.tick + GROWTH_SPAWN_BACKOFF_TICKS
+                )
+
+        if self.pending_optional_spawn:
+            spawn_result = next(
+                (
+                    event
+                    for event in turn.events
+                    if event.event_type
+                    in {"CORE_SPAWN_SUCCEEDED", "CORE_SPAWN_FAILED"}
+                ),
+                None,
+            )
+            if spawn_result is not None:
+                values = getattr(spawn_result, "values", None)
+                unit_type = (
+                    values.get("unit_type")
+                    if isinstance(values, Mapping)
+                    else None
+                )
+                target_id = getattr(spawn_result, "target_id", None)
+                observed_target = any(
+                    unit.id == target_id and unit.unit_type is UnitType.WORKER
+                    for unit in turn.workers
+                )
+                if unit_type in {None, UnitType.WORKER.value}:
+                    confirmed_success = (
+                        spawn_result.event_type == "CORE_SPAWN_SUCCEEDED"
+                        and observed_target
+                    )
+                    if spawn_result.event_type == "CORE_SPAWN_SUCCEEDED" and not confirmed_success:
+                        pass
+                    else:
+                        self.pending_optional_spawn = False
+                        self.pending_optional_spawn_tick = None
+                        if confirmed_success:
+                            self.last_optional_spawn_tick = turn.tick
+                        else:
+                            self.optional_spawn_retry_until_tick = (
+                                turn.tick + GROWTH_SPAWN_BACKOFF_TICKS
+                            )
+            elif (
+                self.pending_optional_spawn_tick is not None
+                and turn.tick > self.pending_optional_spawn_tick + 1
+            ):
+                self.pending_optional_spawn = False
+                self.pending_optional_spawn_tick = None
+                self.optional_spawn_retry_until_tick = (
+                    turn.tick + GROWTH_SPAWN_BACKOFF_TICKS
+                )
+
+        deposited = sum(
+            _event_int(event, "amount")
+            for event in turn.events
+            if event.event_type == "DEPOSIT_SUCCEEDED"
+        )
+        self.economic_deposit_history.append((turn.tick, deposited))
+        cutoff = turn.tick - GROWTH_WINDOW_TICKS + 1
+        while self.economic_deposit_history and self.economic_deposit_history[0][0] < cutoff:
+            self.economic_deposit_history.popleft()
+        while self.economic_blocked_history and self.economic_blocked_history[0][0] < cutoff:
+            self.economic_blocked_history.popleft()
+
+    def _record_economic_blocking(self, turn: Turn) -> None:
+        blocked = any(
+            mode in {
+                "RETURN_BLOCKED",
+                "DELIVERY_CHAIN_CLEAR",
+                "DELIVERY_CHAIN_CARGO",
+                "RESOURCE_BLOCKED",
+            }
+            for mode in self.worker_modes.values()
+        )
+        self.economic_blocked_history.append((turn.tick, blocked))
+
+    def _growth_is_ready(
+        self,
+        turn: Turn,
+        *,
+        next_worker_cost: int,
+        cargo_waiting: bool,
+    ) -> bool:
+        if not self.economic_growth_enabled:
+            return False
+        if turn.state.population != len(turn.units):
+            return False
+        if cargo_waiting or self.pending_optional_spawn:
+            return False
+        if turn.tick < self.optional_spawn_retry_until_tick:
+            return False
+        if turn.tick - self.last_optional_spawn_tick < GROWTH_COOLDOWN_TICKS:
+            return False
+        if len(self.economic_blocked_history) < GROWTH_WINDOW_TICKS:
+            return False
+        window_start = turn.tick - GROWTH_WINDOW_TICKS + 1
+        deposited = sum(
+            amount
+            for tick, amount in self.economic_deposit_history
+            if tick >= window_start
+        )
+        blocked_ticks = sum(
+            int(blocked)
+            for tick, blocked in self.economic_blocked_history
+            if tick >= window_start
+        )
+        return (
+            deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
+            and blocked_ticks == 0
+        )
+
+    def _post_combat_price_is_usable(
+        self,
+        turn: Turn,
+        budget: ProductionBudget,
+        unit_type: UnitType,
+    ) -> bool:
+        """Allow a bounded emergency spawn only when one loss can unlock it."""
+        if self.pending_conditional_spawn or turn.tick < self.conditional_spawn_retry_until_tick:
+            return False
+        if budget.population <= 0 or budget.population >= ABSOLUTE_POPULATION_LIMIT:
+            return False
+        current_cost = unit_cost(unit_type, budget.population)
+        lower_cost = unit_cost(unit_type, budget.population - 1)
+        return budget.resources < current_cost and budget.resources >= lower_cost
 
     @property
     def recovery_mode(self) -> bool:
@@ -2430,6 +2649,15 @@ class CoreFarmer:
         self.scout_return_ids.clear()
         self.scout_cooldown_until.clear()
         self.squad_disengage_until_tick = 0
+        self.economic_deposit_history.clear()
+        self.economic_blocked_history.clear()
+        self.last_optional_spawn_tick = tick
+        self.optional_spawn_retry_until_tick = tick
+        self.pending_optional_spawn = False
+        self.pending_optional_spawn_tick = None
+        self.pending_conditional_spawn = False
+        self.pending_conditional_spawn_tick = None
+        self.conditional_spawn_retry_until_tick = tick
 
     def _update_recovery_mode(self, turn: Turn) -> None:
         if turn.core is None:
@@ -2439,9 +2667,13 @@ class CoreFarmer:
             for event in turn.events
         )
         recovery_worker_goal = min(RECOVERY_MIN_WORKERS, self.worker_target)
+        recovery_inference_limit = CORE_RESOURCE_RESERVE + unit_cost(
+            UnitType.WORKER,
+            turn.state.population,
+        )
         distant_low_stock = (
             len(turn.workers) < recovery_worker_goal
-            and turn.resources < RECOVERY_INFERENCE_RESOURCE_LIMIT
+            and turn.resources < recovery_inference_limit
             and _distance(turn.core.position, turn.beacon.position) >= 80
         )
         if respawned or (distant_low_stock and not self.recovery_mode):
@@ -2939,6 +3171,7 @@ class CoreFarmer:
 
     def choose_actions(self, turn: Turn) -> None:
         turn.clear()
+        self._refresh_economic_history(turn)
         if turn.core is None:
             self._refresh_threat_assessment(turn)
             return
@@ -3262,6 +3495,7 @@ class CoreFarmer:
             context,
             combat_target,
         )
+        self._record_economic_blocking(turn)
         self._control_core(turn, context, combat_target)
 
     @staticmethod
@@ -4055,11 +4289,20 @@ class CoreFarmer:
             core.pickup_beacon()
             return
 
+        population = turn.state.population
+        planned_unit_heal_cost = _planned_unit_heal_cost(turn)
+        production_budget = ProductionBudget(
+            population=population,
+            resources=max(0, turn.resources - planned_unit_heal_cost),
+            planned_unit_heal_cost=planned_unit_heal_cost,
+            worker_cost=unit_cost(UnitType.WORKER, population),
+            vanguard_cost=unit_cost(UnitType.VANGUARD, population),
+            ranger_cost=unit_cost(UnitType.RANGER, population),
+        )
         can_spawn = (
             not self.compatibility_hold
-            and
-            context.friendly_counts[core.position] < 2
-            and len(turn.units) < 19
+            and context.friendly_counts[core.position] < 2
+            and population < ABSOLUTE_POPULATION_LIMIT
         )
         nearest_threat = min(
             (
@@ -4128,24 +4371,53 @@ class CoreFarmer:
 
         # Production is a last resort when a fully shielded Core cannot open a
         # safe escape route. Newly spawned Units cannot act in their creation Tick.
-        if can_spawn:
-            if (
-                nearest_threat is not None
-                and nearest_threat <= 3
-                and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET
-                and turn.resources >= VANGUARD_COST
-            ):
-                core.spawn(UnitType.VANGUARD)
-                return
-            if (
-                nearest_threat is not None
-                and nearest_threat <= 6
-                and len(turn.workers) >= 4
-                and len(turn.rangers) < DEFENSE_RANGER_TARGET
-                and turn.resources >= RANGER_COST
-            ):
-                core.spawn(UnitType.RANGER)
-                return
+        post_combat_vanguard = self._post_combat_price_is_usable(
+            turn,
+            production_budget,
+            UnitType.VANGUARD,
+        )
+        post_combat_ranger = self._post_combat_price_is_usable(
+            turn,
+            production_budget,
+            UnitType.RANGER,
+        )
+        if (
+            nearest_threat is not None
+            and nearest_threat <= 3
+            and (
+                len(turn.vanguards) < EMERGENCY_VANGUARD_TARGET
+                or post_combat_vanguard
+            )
+            and (can_spawn or post_combat_vanguard)
+            and (
+                production_budget.resources >= production_budget.vanguard_cost
+                or post_combat_vanguard
+            )
+        ):
+            core.spawn(UnitType.VANGUARD)
+            if post_combat_vanguard:
+                self.pending_conditional_spawn = True
+                self.pending_conditional_spawn_tick = turn.tick
+            return
+        if (
+            nearest_threat is not None
+            and nearest_threat <= 6
+            and len(turn.workers) >= 4
+            and (
+                len(turn.rangers) < EMERGENCY_RANGER_TARGET
+                or post_combat_ranger
+            )
+            and (can_spawn or post_combat_ranger)
+            and (
+                production_budget.resources >= production_budget.ranger_cost
+                or post_combat_ranger
+            )
+        ):
+            core.spawn(UnitType.RANGER)
+            if post_combat_ranger:
+                self.pending_conditional_spawn = True
+                self.pending_conditional_spawn_tick = turn.tick
+            return
 
         if self.combat_pressure_active:
             core.wait()
@@ -4163,8 +4435,8 @@ class CoreFarmer:
             if (
                 early_defense_is_safe
                 and len(turn.vanguards) < EARLY_DEFENSE_VANGUARD_TARGET
-                and turn.resources
-                >= EARLY_DEFENSE_RESERVE + VANGUARD_COST
+                and production_budget.resources
+                >= EARLY_DEFENSE_RESERVE + production_budget.vanguard_cost
             ):
                 core.spawn(UnitType.VANGUARD)
                 return
@@ -4172,7 +4444,8 @@ class CoreFarmer:
                 early_defense_is_safe
                 and len(turn.vanguards) >= EARLY_DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < EARLY_DEFENSE_RANGER_TARGET
-                and turn.resources >= EARLY_DEFENSE_RESERVE + RANGER_COST
+                and production_budget.resources
+                >= EARLY_DEFENSE_RESERVE + production_budget.ranger_cost
             ):
                 core.spawn(UnitType.RANGER)
                 return
@@ -4182,19 +4455,20 @@ class CoreFarmer:
                 and len(turn.workers)
                 < min(RECOVERY_MIN_WORKERS, self.worker_target)
             ):
-                expansion_threshold = WORKER_EXPANSION_COST
+                expansion_threshold = production_budget.worker_cost
             else:
                 expansion_threshold = _worker_expansion_threshold(
                     len(turn.workers),
                     self.worker_target,
                     turn.resource_capacity,
+                    population,
                 )
             economic_expansion_is_safe = (
                 nearest_threat is None or nearest_threat > 6
             )
             if (
                 len(turn.workers) < self.worker_target
-                and turn.resources >= expansion_threshold
+                and production_budget.resources >= expansion_threshold
                 and economic_expansion_is_safe
             ):
                 core.spawn(UnitType.WORKER)
@@ -4203,10 +4477,12 @@ class CoreFarmer:
             mature_for_defense = (
                 len(turn.workers) >= self.worker_target
                 and nearest_threat is None
-                and turn.resources >= LONG_TERM_DEFENSE_RESERVE
+                and production_budget.resources >= LONG_TERM_DEFENSE_RESERVE
             )
             if mature_for_defense and len(turn.vanguards) < DEFENSE_VANGUARD_TARGET:
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + VANGUARD_COST:
+                if production_budget.resources >= (
+                    LONG_TERM_DEFENSE_RESERVE + production_budget.vanguard_cost
+                ):
                     core.spawn(UnitType.VANGUARD)
                     return
             if (
@@ -4214,9 +4490,35 @@ class CoreFarmer:
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) < DEFENSE_RANGER_TARGET
             ):
-                if turn.resources >= LONG_TERM_DEFENSE_RESERVE + RANGER_COST:
+                if production_budget.resources >= (
+                    LONG_TERM_DEFENSE_RESERVE + production_budget.ranger_cost
+                ):
                     core.spawn(UnitType.RANGER)
                     return
+
+            growth_reserve = CORE_RESOURCE_RESERVE + unit_cost(
+                UnitType.RANGER,
+                population + 1,
+            )
+            if (
+                population < STEADY_POPULATION_LIMIT
+                and len(turn.workers) >= self.worker_target
+                and len(turn.workers) < ECONOMIC_WORKER_LIMIT
+                and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
+                and len(turn.rangers) >= DEFENSE_RANGER_TARGET
+                and nearest_threat is None
+                and self._growth_is_ready(
+                    turn,
+                    next_worker_cost=production_budget.worker_cost,
+                    cargo_waiting=cargo_waiting,
+                )
+                and production_budget.resources
+                >= production_budget.worker_cost + growth_reserve
+            ):
+                core.spawn(UnitType.WORKER)
+                self.pending_optional_spawn = True
+                self.pending_optional_spawn_tick = turn.tick
+                return
 
         if cargo_waiting:
             core.wait()
@@ -4319,7 +4621,7 @@ def _resource_ledger_snapshot(turn: Turn) -> ResourceLedgerSnapshot:
     return ResourceLedgerSnapshot(
         tick=turn.tick,
         resources=turn.resources,
-        population=len(turn.units),
+        population=turn.state.population,
         workers=len(turn.workers),
         vanguards=len(turn.vanguards),
         rangers=len(turn.rangers),
@@ -4352,7 +4654,7 @@ def _reconcile_resource_turn(
         previous=previous,
         tick=turn.tick,
         resources=turn.resources,
-        population=len(turn.units),
+        population=turn.state.population,
         workers=len(turn.workers),
         vanguards=len(turn.vanguards),
         rangers=len(turn.rangers),
@@ -4522,6 +4824,7 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
             f"->{core.view.destination[0]}:{core.view.destination[1]}"
         )
     return (
+        f"population={turn.state.population} "
         f"core={core.position[0]}:{core.position[1]} "
         f"core_state={core.view.state.value}{movement} "
         f"core_action={core_action_name} "
@@ -4770,7 +5073,7 @@ def play(
                         heartbeat_file,
                         tick=accepted.tick,
                         resources=turn.resources,
-                        population=len(turn.units),
+                        population=turn.state.population,
                         core_alive=turn.core is not None,
                     )
                 if _should_log_turn(turn):
@@ -4778,6 +5081,7 @@ def play(
                     print(
                         f"tick={accepted.tick} accepted={accepted.accepted} "
                         f"resources={turn.resources}/{turn.resource_capacity} "
+                        f"population={turn.state.population} "
                         f"workers={len(turn.workers)} vanguards={len(turn.vanguards)} "
                         f"rangers={len(turn.rangers)} cargo={sum(worker.cargo for worker in turn.workers)} "
                         f"visible_resources={len(turn.resource_cells)} actions={actions} events={events} "

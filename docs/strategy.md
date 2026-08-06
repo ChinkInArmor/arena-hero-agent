@@ -4,22 +4,29 @@ The default profile optimizes for long-term Core survival and resource accumulat
 
 ## Population Plan
 
-The mature target is:
+Production has three bounded layers:
 
-| Unit | Target | Role |
-| --- | ---: | --- |
-| Worker | 12 | Harvest, deposit, scout, observe, and recover dropped cargo. |
-| Vanguard | 3 | Outer screen, route screening, and bounded assault reinforcement. |
-| Ranger | 4 | Inner Core defense and ranged stationary-target clearing. |
-| Total | 19 | Remains below the 20-population resource penalty. |
+| Layer | Profile | Policy |
+| --- | --- | --- |
+| Baseline | `12 Worker + 3 Vanguard + 4 Ranger = 19` | Preserve the validated collection and defense envelope. |
+| Economic growth | Up to `17 Worker + 3 Vanguard + 4 Ranger = 24` | Add one Worker only after a 32-Tick, low-congestion deposit window pays at least twice the next dynamic Worker price. |
+| Emergency slot | Maximum population `25` | Permit one extra Vanguard or Ranger only for an immediate measured threat after safe evasion cannot be started. |
 
-Production reserves resources between stages and does not build beyond the configured Worker target and defense targets.
+The Agent calls the official SDK `unit_cost(unit_type, turn.state.population)`
+for every production and reserve comparison. It keeps a Core reserve plus the
+next Ranger price before optional growth, and it reserves the worst legal spend
+for Unit healing already present in the submitted plan. At a price-tier boundary,
+an immediate defender replacement may be conditionally submitted when one
+combat loss would make it affordable; without that loss the server rejects the
+conditional action and the Agent backs off. It never treats a queued spawn as
+successful; the next authoritative state and matching spawn event must confirm
+whether growth occurred.
 
-The proposed `15 Worker + 2 Vanguard + 2 Ranger` profile also stays at 19, but
-it removes one Vanguard and two Rangers from the current survival envelope. It
-remains an A/B-test candidate rather than the default until collection
-throughput, unit loss, Core damage, healing cost, and unattended survival can be
-compared over equivalent windows.
+Optional growth is disabled for explicitly smaller Worker profiles. The default
+12-Worker profile can remain at 19 when deposits, congestion, recovery, threat,
+or compatibility uncertainty do not justify the next purchase. Population 25 is
+a named absolute bound, not a target, and the Agent never self-destructs to
+rebalance a full fleet.
 
 ## Core Safety
 
@@ -61,7 +68,7 @@ compared over equivalent windows.
   or imminent cargo delivery pauses the return.
 - Confirmed stationary units can be cleared by a small bounded strike group while guards remain with the Core, but only outside combat pressure.
 - A stationary Core is considered for a raid only after repeated observations and isolation checks. The Worker that exposed it may remain as the designated observer. The default strike group can engage from at most 48 path-independent Manhattan cells and releases a target if pulled beyond 56, while one Vanguard and one Ranger remain as Core guards.
-- Under gameplay v0.13, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
+- Under gameplay v0.14, Rangers use target-free cell fire for legal defensive shots so another hostile remaining in the submitted cell can still be hit. A strike Ranger may also fire at the remembered cell of a confirmed stationary Core during a short visibility gap.
 - Loss of visibility does not immediately invalidate stationary-target memory, but moving escorts, contradictory observations, age, and risk reduce confidence.
 - Loot events, storage capacity, same-Tick Core survival, and return-path cost determine whether a kill was economically useful.
 

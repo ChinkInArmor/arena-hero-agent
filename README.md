@@ -12,7 +12,7 @@ This is a community project and is not an official Arena Hero product.
 
 ## Highlights
 
-- Builds toward `12 Workers + 3 Vanguards + 4 Rangers = 19` population, staying below the 20-population resource penalty.
+- Builds a proven `12 Workers + 3 Vanguards + 4 Rangers = 19` baseline, then grows conservatively to 24 population when recent deposits justify the next dynamic price tier; one additional slot is reserved for emergency defense.
 - Moves the Core away from the Beacon, prioritizes collection and survival, and maintains distributed Core defense.
 - Classifies lifecycle, threat, and Unit missions independently, including activity alerts, pre-evasion, engagement, multi-axis breakout, and detached-squad return.
 - Scouts stale map regions, tracks resource memory, returns cargo, and recovers dropped cargo after losses.
@@ -42,7 +42,7 @@ flowchart LR
 - A GNU/Linux server with systemd 235+ for the unattended server path; systemd
   247+ applies the complete unit hardening policy
 
-The tested contract is API `v0.1`, gameplay `v0.13`, and official Python SDK `0.2.8`. The bundled version monitor fails closed when it detects an incompatible contract.
+The tested contract is API `v0.1`, gameplay `v0.14`, and official Python SDK `0.2.9`. The bundled version monitor fails closed when it detects an incompatible contract.
 
 ## Quick Start
 

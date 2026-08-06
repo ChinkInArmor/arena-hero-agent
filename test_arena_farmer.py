@@ -11,7 +11,16 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
-from arena_hero import Accepted, CommandPlan, Direction, PlayerState, Received, Turn
+from arena_hero import (
+    Accepted,
+    CommandPlan,
+    Direction,
+    PlayerState,
+    Received,
+    Turn,
+    UnitType,
+    unit_cost,
+)
 
 from arena_farmer import (
     CoreFarmer,
@@ -100,6 +109,7 @@ def make_turn(
     *,
     tick: int = 9,
     resources: int = 0,
+    population: int | None = None,
     core_hp: int = 5,
     shield: int = 5,
     core: bool = True,
@@ -159,9 +169,7 @@ def make_turn(
             "status": "ACTIVE" if core else "RESPAWNING",
             "respawn_at_tick": None if core else tick + 10,
             "resources": resources,
-            "population": len(units or []),
-            "population_tier": 0,
-            "upkeep_next_tick": 0,
+            "population": len(units or []) if population is None else population,
             "champion_beacon": beacon,
             "objects": objects,
             "events": events or [],
@@ -3025,7 +3033,7 @@ class CoreFarmerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between 1 and 12"):
             CoreFarmer(worker_target=13)
 
-    def test_population_hard_stops_at_19_without_self_destruct(self) -> None:
+    def test_population_holds_at_baseline_without_growth_evidence(self) -> None:
         units = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
@@ -3056,6 +3064,327 @@ class CoreFarmerTests(unittest.TestCase):
                 for action in queued.get("unit_actions", {}).values()
             )
         )
+
+    def _mature_units(self) -> list[dict[str, object]]:
+        return self._workers(12) + [
+            unit(VANGUARD_1, "VANGUARD", (4, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 1)),
+            unit(VANGUARD_3, "VANGUARD", (4, 2)),
+            unit(RANGER_1, "RANGER", (5, 0)),
+            unit(RANGER_2, "RANGER", (5, 1)),
+            unit(RANGER_3, "RANGER", (5, 2)),
+            unit(RANGER_4, "RANGER", (5, 3)),
+        ]
+
+    def test_v014_price_boundaries_use_official_helper(self) -> None:
+        expected = {
+            19: (5, 10, 12),
+            20: (7, 13, 16),
+            21: (7, 13, 16),
+            24: (7, 13, 16),
+            25: (8, 17, 20),
+            26: (8, 17, 20),
+            29: (8, 17, 20),
+            30: (11, 22, 26),
+        }
+        for population, prices in expected.items():
+            with self.subTest(population=population):
+                self.assertEqual(
+                    tuple(
+                        unit_cost(unit_type, population)
+                        for unit_type in (
+                            UnitType.WORKER,
+                            UnitType.VANGUARD,
+                            UnitType.RANGER,
+                        )
+                    ),
+                    prices,
+                )
+
+    def test_worker_affordability_uses_authoritative_population(self) -> None:
+        workers = self._workers(4)
+        not_yet = plan(
+            make_turn(
+                resources=16,
+                population=20,
+                units=workers,
+            )
+        )
+        ready = plan(
+            make_turn(
+                resources=17,
+                population=20,
+                units=workers,
+            )
+        )
+
+        self.assertNotEqual(
+            not_yet.get("core_action", {}).get("unit_type"),
+            "WORKER",
+        )
+        self.assertEqual(ready["core_action"]["unit_type"], "WORKER")
+
+    def test_late_worker_stage_uses_dynamic_cost_for_each_next_worker(self) -> None:
+        workers = self._workers(6)
+        not_yet = plan(
+            make_turn(resources=28, population=20, units=workers)
+        )
+        ready = plan(
+            make_turn(resources=29, population=20, units=workers)
+        )
+
+        self.assertNotEqual(
+            not_yet.get("core_action", {}).get("unit_type"),
+            "WORKER",
+        )
+        self.assertEqual(ready["core_action"]["unit_type"], "WORKER")
+
+    def test_unit_heal_budget_precedes_dynamic_spawn_budget(self) -> None:
+        units = self._workers(12) + [
+            unit(VANGUARD_1, "VANGUARD", (4, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 1)),
+            unit(RANGER_1, "RANGER", (0, 0), hp=1),
+        ]
+        turn = make_turn(resources=25, units=units)
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(queued["unit_actions"][RANGER_1]["type"], "HEAL")
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "SPAWN")
+
+    def test_optional_growth_requires_a_full_self_funding_window(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        units = self._mature_units()
+        for tick in range(100, 132):
+            turn = make_turn(
+                tick=tick,
+                resources=40,
+                units=units,
+                events=[
+                    {
+                        "event_id": f"30000000-0000-4000-8000-{tick:012x}",
+                        "tick": tick - 1,
+                        "event_type": "DEPOSIT_SUCCEEDED",
+                        "actor_id": WORKER_1,
+                        "target_id": CORE_ID,
+                        "position": [0, 0],
+                        "values": {"amount": 1},
+                    }
+                ],
+            )
+            tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertTrue(tactic.pending_optional_spawn)
+
+        resolved = make_turn(
+            tick=132,
+            resources=35,
+            population=20,
+            units=units + [unit("20000000-0000-4000-8000-000000000020", "WORKER", (20, 20), cargo=0)],
+            events=[
+                {
+                    "event_id": "30000000-0000-4000-8000-000000000132",
+                    "tick": 131,
+                    "event_type": "CORE_SPAWN_SUCCEEDED",
+                    "actor_id": CORE_ID,
+                    "target_id": "20000000-0000-4000-8000-000000000020",
+                    "position": [0, 0],
+                    "values": {"unit_type": "WORKER", "cost": 5},
+                }
+            ],
+        )
+        tactic.choose_actions(resolved)
+        self.assertFalse(tactic.pending_optional_spawn)
+        self.assertEqual(tactic.last_optional_spawn_tick, 132)
+        self.assertNotEqual(
+            resolved.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("unit_type"),
+            "WORKER",
+        )
+
+    def test_optional_growth_requires_event_and_authoritative_target(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.pending_optional_spawn = True
+        tactic.pending_optional_spawn_tick = 99
+        missing_id = "20000000-0000-4000-8000-000000000099"
+        mismatched = make_turn(
+            tick=100,
+            resources=40,
+            units=self._mature_units(),
+            events=[
+                {
+                    "event_id": "30000000-0000-4000-8000-000000000100",
+                    "tick": 99,
+                    "event_type": "CORE_SPAWN_SUCCEEDED",
+                    "actor_id": CORE_ID,
+                    "target_id": missing_id,
+                    "position": [0, 0],
+                    "values": {"unit_type": "WORKER", "cost": 5},
+                }
+            ],
+        )
+        tactic.choose_actions(mismatched)
+        self.assertTrue(tactic.pending_optional_spawn)
+
+        authoritative = make_turn(
+            tick=101,
+            resources=40,
+            units=self._mature_units(),
+        )
+        tactic.choose_actions(authoritative)
+        self.assertFalse(tactic.pending_optional_spawn)
+        self.assertEqual(tactic.last_optional_spawn_tick, -32)
+        self.assertEqual(tactic.optional_spawn_retry_until_tick, 109)
+
+    def test_optional_growth_stops_at_steady_population_limit(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 25)
+        ]
+        units = self._mature_units() + extra_workers
+        turn = make_turn(resources=100, population=24, units=units)
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.choose_actions(turn)
+
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertNotEqual(queued.get("core_action", {}).get("unit_type"), "WORKER")
+
+    def test_emergency_defense_can_use_reserved_population_slot(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 25)
+        ]
+        units = self._mature_units() + extra_workers
+        turn = make_turn(
+            resources=20,
+            population=24,
+            units=units,
+            enemies=[unit(ENEMY_1, "VANGUARD", (1, 0), controlled=False)],
+            obstacles=[(0, -1), (-1, 0), (0, 1)],
+        )
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+
+    def test_recovery_inference_uses_current_population_price(self) -> None:
+        defenders = [
+            unit(VANGUARD_1, "VANGUARD", (4, 0)),
+            unit(VANGUARD_2, "VANGUARD", (4, 1)),
+            unit(VANGUARD_3, "VANGUARD", (4, 2)),
+        ] + [
+            unit(
+                f"40000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (6 + index, 0),
+            )
+            for index in range(12)
+        ]
+        turn = make_turn(
+            resources=16,
+            population=20,
+            core_position=(0, 0),
+            beacon_position=(100, 0),
+            units=self._workers(5) + defenders,
+        )
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertTrue(tactic.recovery_mode)
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
+    def test_same_tick_loss_can_unlock_lower_price_emergency_replacement(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 26)
+        ]
+        units = self._mature_units() + extra_workers[:1]
+        tactic = CoreFarmer(beacon_policy="hold")
+        planned = make_turn(
+            resources=12,
+            population=20,
+            units=units,
+            enemies=[unit(ENEMY_1, "VANGUARD", (1, 0), controlled=False)],
+            obstacles=[(0, -1), (-1, 0), (0, 1)],
+        )
+        tactic.choose_actions(planned)
+        queued = planned.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+        self.assertTrue(tactic.pending_conditional_spawn)
+
+        spawned_id = "20000000-0000-4000-8000-000000000026"
+        resolved = make_turn(
+            tick=10,
+            resources=2,
+            population=20,
+            units=units[1:] + [unit(spawned_id, "VANGUARD", (0, 0))],
+            events=[
+                {
+                    "event_id": "30000000-0000-4000-8000-000000000010",
+                    "tick": 9,
+                    "event_type": "UNIT_DESTROYED",
+                    "target_id": WORKER_1,
+                    "values": {"reason": "ATTACK"},
+                },
+                {
+                    "event_id": "30000000-0000-4000-8000-000000000011",
+                    "tick": 9,
+                    "event_type": "CORE_SPAWN_SUCCEEDED",
+                    "actor_id": CORE_ID,
+                    "target_id": spawned_id,
+                    "position": [0, 0],
+                    "values": {"unit_type": "VANGUARD", "cost": 10},
+                },
+            ],
+        )
+        tactic.choose_actions(resolved)
+        self.assertFalse(tactic.pending_conditional_spawn)
+
+    def test_population_25_is_absolute_spawn_boundary(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 26)
+        ]
+        units = self._mature_units() + extra_workers
+        turn = make_turn(
+            resources=16,
+            population=25,
+            units=units,
+            enemies=[unit(ENEMY_1, "VANGUARD", (1, 0), controlled=False)],
+            obstacles=[(0, -1), (-1, 0), (0, 1)],
+        )
+        tactic = CoreFarmer(beacon_policy="hold")
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertNotEqual(queued.get("core_action", {}).get("type"), "SPAWN")
 
     def test_four_workers_accumulate_before_expanding_to_six(self) -> None:
         workers = [

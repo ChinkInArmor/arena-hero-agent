@@ -65,7 +65,7 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
 }
 
 $keyInEnvironment = -not [string]::IsNullOrWhiteSpace($env:ARENA_HERO_API_KEY)
-$keyInFile = Test-Path -LiteralPath $envPath -PathType Leaf -and
+$keyInFile = (Test-Path -LiteralPath $envPath -PathType Leaf) -and
     (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*\S+' -Quiet) -and
     -not (Select-String -LiteralPath $envPath -Pattern '^\s*ARENA_HERO_API_KEY\s*=\s*(replace-with|your-|<)' -Quiet)
 if (-not $keyInEnvironment -and -not $keyInFile) {
