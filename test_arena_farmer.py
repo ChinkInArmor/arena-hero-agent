@@ -3552,6 +3552,38 @@ class CoreFarmerTests(unittest.TestCase):
         )
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
 
+    def test_full_resource_core_cargo_deadlock_moves_cargo_and_spawns(self) -> None:
+        workers = [
+            unit(WORKER_1, "WORKER", (0, 0), cargo=1),
+            unit(WORKER_2, "WORKER", (0, 1), cargo=1),
+            unit(WORKER_3, "WORKER", (0, -1), cargo=1),
+            unit(WORKER_4, "WORKER", (-1, 0), cargo=1),
+            unit(WORKER_5, "WORKER", (1, 0), cargo=1),
+            unit(WORKER_6, "WORKER", (3, 0), cargo=1),
+            unit(WORKER_7, "WORKER", (4, 0), cargo=1),
+            unit(WORKER_8, "WORKER", (5, 0), cargo=1),
+            unit(WORKER_9, "WORKER", (6, 0), cargo=1),
+        ]
+        queued = plan(
+            make_turn(
+                resources=60,
+                units=workers
+                + [
+                    unit(VANGUARD_1, "VANGUARD", (3, 3)),
+                    unit(VANGUARD_2, "VANGUARD", (4, 3)),
+                    unit(RANGER_1, "RANGER", (5, 3)),
+                ],
+            )
+        )
+
+        self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertNotEqual(
+            queued["unit_actions"][WORKER_1].get("direction"),
+            "WAIT",
+        )
+
     def test_departing_worker_frees_core_spawn_slot(self) -> None:
         queued = plan(
             make_turn(

@@ -1020,18 +1020,22 @@ def _queue_core_delivery_handoff(
     core = turn.core
     if core is None or context.core_position is None:
         return set()
-    empty_workers = sorted(
+    core_workers = sorted(
         (
             worker
             for worker in turn.workers
-            if worker.cargo == 0 and worker.position == core.position
+            if worker.position == core.position
+            and (worker.cargo == 0 or turn.resource_space == 0)
         ),
-        key=_uuid_sort_key,
+        key=lambda worker: (
+            int(worker.cargo > 0),
+            _uuid_sort_key(worker),
+        ),
     )
-    if not empty_workers:
+    if not core_workers:
         return set()
 
-    empty_worker = empty_workers[0]
+    departing_worker = core_workers[0]
     passable_neighbors = []
     for direction in CARDINAL_DIRECTIONS:
         destination = _destination(core.position, direction)
@@ -1114,32 +1118,36 @@ def _queue_core_delivery_handoff(
     first_position = chain[0]
     first_direction = _direction_to_adjacent(core.position, first_position)
     if first_direction is None or not _queue_move(
-        empty_worker,
+        departing_worker,
         (first_direction,),
         context,
     ):
         return handoff
-    handoff.add(empty_worker.id)
+    handoff.add(departing_worker.id)
 
-    for worker in sorted(
-        (
-            worker
-            for worker in turn.workers
-            if worker.cargo > 0
-            and worker.id not in handoff
-            and _distance(worker.position, core.position) == 1
-        ),
-        key=_uuid_sort_key,
-    ):
-        direction = _direction_to_adjacent(worker.position, core.position)
-        if direction is not None and _queue_move(
-            worker,
-            (direction,),
-            context,
-            allow_core_entry=True,
+    if turn.resource_space == 0:
+        context.reserved_destinations.add(core.position)
+
+    if turn.resource_space > 0:
+        for worker in sorted(
+            (
+                worker
+                for worker in turn.workers
+                if worker.cargo > 0
+                and worker.id not in handoff
+                and _distance(worker.position, core.position) == 1
+            ),
+            key=_uuid_sort_key,
         ):
-            handoff.add(worker.id)
-            break
+            direction = _direction_to_adjacent(worker.position, core.position)
+            if direction is not None and _queue_move(
+                worker,
+                (direction,),
+                context,
+                allow_core_entry=True,
+            ):
+                handoff.add(worker.id)
+                break
     return handoff
 
 
