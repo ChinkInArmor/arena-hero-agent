@@ -3228,6 +3228,32 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["core_action"]["type"], "SPAWN")
         self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
 
+    def test_full_storage_growth_clears_cargo_from_core_before_spawning(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        for tick in range(100, 132):
+            tactic.economic_blocked_history.append((tick, True))
+
+        units = self._mature_units()
+        units[0] = unit(WORKER_1, "WORKER", (0, 0), cargo=1)
+        units.append(
+            unit(
+                "20000000-0000-4000-8000-000000000020",
+                "WORKER",
+                (20, 20),
+                cargo=0,
+            )
+        )
+        turn = make_turn(tick=132, resources=100, units=units)
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(
+            queued["unit_actions"][WORKER_1],
+            {"type": "MOVE", "direction": "RIGHT"},
+        )
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
     def test_optional_growth_does_not_bypass_blocking_before_storage_is_full(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
         for tick in range(100, 132):

@@ -1046,10 +1046,21 @@ def _queue_core_delivery_handoff(
         if destination in context.enemy_cells or destination in context.danger_cells:
             continue
         passable_neighbors.append((direction, destination))
-    if not passable_neighbors or any(
-        context.friendly_counts[position] == 0
-        for _, position in passable_neighbors
-    ):
+    if not passable_neighbors:
+        return set()
+
+    open_neighbors = [
+        (direction, position)
+        for direction, position in passable_neighbors
+        if context.friendly_counts[position] == 0
+        and position not in context.reserved_destinations
+    ]
+    if open_neighbors:
+        if departing_worker.cargo > 0 and turn.resource_space == 0:
+            direction, _ = open_neighbors[0]
+            if _queue_move(departing_worker, (direction,), context):
+                context.reserved_destinations.add(core.position)
+                return {departing_worker.id}
         # Normal resource/scout routing clears a free lane without overriding
         # useful work. Coordination is needed only when all exits are occupied.
         return set()
