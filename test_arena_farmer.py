@@ -3207,6 +3207,45 @@ class CoreFarmerTests(unittest.TestCase):
             "WORKER",
         )
 
+    def test_optional_growth_uses_full_storage_after_observation_window(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        units = self._mature_units()
+        for tick in range(100, 130):
+            tactic.economic_blocked_history.append((tick, True))
+
+        too_early = make_turn(tick=130, resources=95, units=units)
+        tactic.choose_actions(too_early)
+        self.assertNotEqual(
+            too_early.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("unit_type"),
+            "WORKER",
+        )
+
+        ready = make_turn(tick=131, resources=95, units=units)
+        tactic.choose_actions(ready)
+        queued = ready.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
+    def test_optional_growth_does_not_bypass_blocking_before_storage_is_full(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        for tick in range(100, 132):
+            tactic.economic_blocked_history.append((tick, True))
+
+        turn = make_turn(
+            tick=132,
+            resources=94,
+            units=self._mature_units(),
+        )
+        tactic.choose_actions(turn)
+        self.assertNotEqual(
+            turn.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("unit_type"),
+            "WORKER",
+        )
+
     def test_optional_growth_requires_event_and_authoritative_target(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
         tactic.pending_optional_spawn = True

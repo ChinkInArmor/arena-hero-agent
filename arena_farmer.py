@@ -1703,7 +1703,8 @@ class CoreFarmer:
             for tick, blocked in self.economic_blocked_history
             if tick >= window_start
         )
-        return (
+        storage_saturated = turn.resource_space == 0
+        return storage_saturated or (
             deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
             and blocked_ticks == 0
         )
