@@ -69,7 +69,7 @@ disabled unless `ARENA_STRATEGY_PROVIDER` is configured.
 | `ARENA_STRATEGY_MODEL` | none | Provider model ID. |
 | `ARENA_STRATEGY_API_KEY_FILE` | none | Separate read-only credential file; omit for an unauthenticated local endpoint. |
 | `ARENA_STRATEGY_INTERVAL_TICKS` | `256` | Request cadence, restricted to 128-512 Tick numbers. |
-| `ARENA_STRATEGY_TIMEOUT_SECONDS` | `8` | Background HTTP timeout, greater than 0 and at most 12 seconds. |
+| `ARENA_STRATEGY_TIMEOUT_SECONDS` | `8` | Background HTTP timeout, greater than 0 and at most 60 seconds. |
 
 The key file must not be an ordinary environment file, CLI value, or repository
 file. Anthropic requires it. OpenAI-compatible local Ollama/vLLM endpoints may

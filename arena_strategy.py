@@ -324,8 +324,8 @@ class AdviserConfig:
             raise ValueError("strategy adviser model is required")
         if not MIN_ADVISER_INTERVAL_TICKS <= self.interval_ticks <= MAX_ADVISER_INTERVAL_TICKS:
             raise ValueError("strategy adviser interval must be between 128 and 512")
-        if not 0 < self.timeout_seconds <= 12:
-            raise ValueError("strategy adviser timeout must be between 0 and 12 seconds")
+        if not 0 < self.timeout_seconds <= 60:
+            raise ValueError("strategy adviser timeout must be between 0 and 60 seconds")
 
 
 def _extract_openai_text(data: object) -> str:

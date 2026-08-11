@@ -97,6 +97,22 @@ class StrategicValidationTests(unittest.TestCase):
             AdviserConfig("openai-compatible", "http://localhost:11434", "m", interval_ticks=64)
         with self.assertRaises(ValueError):
             AdviserConfig("unknown", "https://example.test", "m")
+        self.assertEqual(
+            AdviserConfig(
+                "openai-compatible",
+                "https://example.test",
+                "m",
+                timeout_seconds=60,
+            ).timeout_seconds,
+            60,
+        )
+        with self.assertRaisesRegex(ValueError, "0 and 60"):
+            AdviserConfig(
+                "openai-compatible",
+                "https://example.test",
+                "m",
+                timeout_seconds=60.1,
+            )
 
 
 class LocalPlannerTests(unittest.TestCase):
