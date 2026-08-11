@@ -8,6 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=arena-hero
 Group=arena-hero
+SupplementaryGroups=arena-hero-observe
 WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
@@ -18,7 +19,7 @@ EnvironmentFile=/etc/arena-hero-agent.env
 EnvironmentFile=-/etc/arena-hero-agent/runtime.env
 RuntimeDirectory=arena-hero-agent
 RuntimeDirectoryMode=0750
-ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --heartbeat-file /run/arena-hero-agent/heartbeat.json --stale-turn-timeout-seconds 90
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-agent --env-file /etc/arena-hero-agent.env --worker-target ${ARENA_WORKER_TARGET} --beacon-policy ${ARENA_BEACON_POLICY} --heartbeat-file /run/arena-hero-agent/heartbeat.json --observation-dir /var/lib/arena-hero-observability/inbox --stale-turn-timeout-seconds 90
 Restart=on-failure
 RestartPreventExitStatus=2 10 11 12 13 14 130
 RestartForceExitStatus=75
@@ -44,6 +45,7 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
+ReadWritePaths=/var/lib/arena-hero-observability/inbox
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true

@@ -10,6 +10,8 @@ Use the document that matches the task:
   and bounded-combat policy.
 - [Hybrid strategic control](hybrid-strategy.md): dynamic local planning,
   influence scoring, marginal production, and the optional model adviser.
+- [Read-only operations Dashboard](dashboard.md): redacted observation schema,
+  SQLite retention, FastAPI/React service isolation, and Caddy deployment.
 - [v0.14 economic strategy upgrade](v0.14-economic-strategy-upgrade.md):
   approved requirements and acceptance criteria for adapting the production
   policy to population-based Unit prices.

@@ -19,6 +19,7 @@ from typing import Protocol
 from uuid import UUID
 
 from arena_health import write_heartbeat
+from arena_observability import AsyncObservationWriter, build_observation
 from arena_strategy import (
     AdviserConfig,
     AsyncStrategicAdviser,
@@ -1776,6 +1777,10 @@ class CoreFarmer:
         )
         self._strategic_context = context
         self.strategic_parameters = self.strategic_controller.update(context)
+
+    @property
+    def current_strategic_context(self) -> StrategicContext | None:
+        return self._strategic_context
 
     def observe_accepted_strategy(self) -> None:
         if self._strategic_context is not None:
@@ -5196,6 +5201,7 @@ def play(
     heartbeat_file: Path | None = None,
     stale_turn_timeout_seconds: float = DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
     strategic_adviser: AsyncStrategicAdviser | None = None,
+    observation_writer: AsyncObservationWriter | None = None,
 ) -> None:
     if (
         not math.isfinite(stale_turn_timeout_seconds)
@@ -5260,6 +5266,13 @@ def play(
                         population=turn.state.population,
                         core_alive=turn.core is not None,
                     )
+                if observation_writer is not None:
+                    try:
+                        observation_writer.submit(
+                            build_observation(turn, tactic, accepted.tick)
+                        )
+                    except Exception:
+                        pass
                 if _should_log_turn(turn):
                     actions, events = _turn_diagnostics(turn)
                     print(
@@ -5324,6 +5337,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
         help="Exit transiently after this many seconds without an accepted Turn (0 disables).",
     )
+    parser.add_argument(
+        "--observation-dir",
+        type=Path,
+        help="Write asynchronous redacted Dashboard observations to this directory.",
+    )
     return parser
 
 
@@ -5334,8 +5352,11 @@ def _is_transient_api_error(exc: APIError) -> bool:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     strategic_adviser: AsyncStrategicAdviser | None = None
+    observation_writer: AsyncObservationWriter | None = None
     try:
         strategic_adviser = _strategic_adviser_from_environment()
+        if args.observation_dir is not None:
+            observation_writer = AsyncObservationWriter(args.observation_dir)
         api_key = load_api_key(env_file=args.env_file)
         play(
             api_key,
@@ -5346,6 +5367,7 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat_file=args.heartbeat_file,
             stale_turn_timeout_seconds=args.stale_turn_timeout_seconds,
             strategic_adviser=strategic_adviser,
+            observation_writer=observation_writer,
         )
 
     except KeyboardInterrupt:
@@ -5373,6 +5395,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Arena Hero agent stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return AGENT_EXIT_CODE
     finally:
+        if observation_writer is not None:
+            observation_writer.close()
         if strategic_adviser is not None:
             strategic_adviser.close()
     return 0

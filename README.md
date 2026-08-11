@@ -146,6 +146,14 @@ sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
+### Read-only operations Dashboard
+
+The optional FastAPI/React Dashboard exposes redacted health, economy, fleet,
+strategy, adviser, trend, and event data through a loopback-only service. It has
+no game-control, command, credential, raw-log, or service-action endpoint. The
+supported public edge is Cloudflare proxy to Caddy HTTPS and Basic Auth. See
+[Dashboard deployment and isolation](docs/dashboard.md).
+
 ## AI Is Optional
 
 The main Agent never needs a model. Its optional strategic adviser runs in a background thread and can change only a strict, expiring parameter schema; deterministic code still owns legality, pathfinding, combat, economy execution, emergency defense, and submission. OpenAI-compatible services (including GPT, DeepSeek, Ollama, and vLLM) and Anthropic are supported. Model credentials are separate key files and are never CLI values or ordinary environment-file secrets. See [hybrid strategic control](docs/hybrid-strategy.md).
@@ -193,7 +201,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_strategy.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

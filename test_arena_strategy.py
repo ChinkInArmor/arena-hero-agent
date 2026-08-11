@@ -276,6 +276,12 @@ class AsyncAdviserTests(unittest.TestCase):
                     break
                 time.sleep(0.01)
             self.assertEqual(result.source, "model")
+            telemetry = adviser.telemetry(1001, "model:openai-compatible")
+            self.assertEqual(telemetry["requests"], 1)
+            self.assertEqual(telemetry["applied"], 1)
+            self.assertEqual(telemetry["failures"], 0)
+            self.assertEqual(telemetry["ttl_remaining_ticks"], 127)
+            self.assertFalse(telemetry["overridden"])
             expired = controller.update(context(tick=1129))
             self.assertNotEqual(expired.source, "model")
         finally:
@@ -304,6 +310,9 @@ class AsyncAdviserTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(result.source, "local-expand")
             self.assertEqual(adviser.last_outcome, "failed:TimeoutError")
+            telemetry = adviser.telemetry(first_context.tick, result.source)
+            self.assertEqual(telemetry["requests"], 1)
+            self.assertEqual(telemetry["failures"], 1)
         finally:
             adviser.close()
 

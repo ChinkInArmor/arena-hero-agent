@@ -448,6 +448,11 @@ class AsyncStrategicAdviser:
         self._latest: StrategicParameters | None = None
         self._next_request_tick = 0
         self._last_outcome = "idle"
+        self._request_count = 0
+        self._applied_count = 0
+        self._failure_count = 0
+        self._last_request_tick: int | None = None
+        self._last_applied_tick: int | None = None
         self._closed = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="arena-strategy-adviser", daemon=True
@@ -459,11 +464,40 @@ class AsyncStrategicAdviser:
         with self._lock:
             return self._last_outcome
 
+    def telemetry(self, tick: int, active_source: str) -> dict[str, object]:
+        with self._lock:
+            latest = self._latest
+            valid_until = latest.valid_until_tick if latest is not None else None
+            return {
+                "enabled": True,
+                "provider": self.config.provider,
+                "model": self.config.model,
+                "outcome": self._last_outcome,
+                "requests": self._request_count,
+                "applied": self._applied_count,
+                "failures": self._failure_count,
+                "last_request_tick": self._last_request_tick,
+                "last_applied_tick": self._last_applied_tick,
+                "next_request_tick": self._next_request_tick,
+                "advice_valid_until_tick": valid_until,
+                "ttl_remaining_ticks": (
+                    max(0, valid_until - tick) if valid_until is not None else None
+                ),
+                "overridden": (
+                    latest is not None
+                    and latest.valid_until_tick >= tick
+                    and not active_source.startswith("model:")
+                ),
+            }
+
     def observe(self, context: StrategicContext, local: StrategicParameters) -> None:
         with self._lock:
             if context.tick < self._next_request_tick:
                 return
             self._next_request_tick = context.tick + self.config.interval_ticks
+            self._request_count += 1
+            self._last_request_tick = context.tick
+            self._last_outcome = "queued"
         try:
             self._queue.put_nowait((context, local))
         except Full:
@@ -503,10 +537,13 @@ class AsyncStrategicAdviser:
                 candidate = self._requester(context, local)
             except Exception as exc:
                 with self._lock:
+                    self._failure_count += 1
                     self._last_outcome = f"failed:{type(exc).__name__}"
                 continue
             with self._lock:
                 self._latest = candidate
+                self._applied_count += 1
+                self._last_applied_tick = context.tick
                 self._last_outcome = "applied"
 
 

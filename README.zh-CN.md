@@ -127,6 +127,13 @@ sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
+### 只读运维控制台
+
+可选的 FastAPI/React 控制台通过仅监听回环地址的独立服务展示脱敏后的健康、
+经济、舰队、战略、模型顾问、趋势和事件数据。它不提供游戏控制、命令执行、
+凭据、原始日志或服务操作接口。公网入口采用 Cloudflare 橙云、Caddy HTTPS 和
+Basic Auth。部署与权限边界见 [运维控制台文档](docs/dashboard.md)。
+
 ## 模型监督是可选项
 
 主 Agent 完全不需要模型。Supervisor 只有同时满足以下条件才会调用模型：
@@ -157,7 +164,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_strategy.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

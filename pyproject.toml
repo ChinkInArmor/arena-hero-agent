@@ -12,7 +12,9 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
     "arena-hero==0.2.9",
+    "fastapi==0.116.1",
     "httpx==0.28.1",
+    "uvicorn==0.35.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -37,11 +39,14 @@ arena-hero-supervisor = "arena_supervisor:main"
 arena-hero-optimizer = "arena_optimizer:main"
 arena-hero-version-monitor = "arena_version_monitor:main"
 arena-hero-health = "arena_health:main"
+arena-hero-dashboard = "arena_dashboard:main"
 
 [tool.setuptools]
 py-modules = [
     "arena_farmer",
+    "arena_observability",
     "arena_strategy",
+    "arena_dashboard",
     "arena_optimizer",
     "arena_supervisor",
     "arena_version_monitor",

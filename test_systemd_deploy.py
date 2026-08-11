@@ -133,6 +133,8 @@ class SystemdDeploymentTests(unittest.TestCase):
         self.etc_root = etc_root
         self.unit_dir = unit_dir
         self.runtime_dir = runtime_dir
+        self.observation_root = self.root / "var" / "lib" / "arena-hero-observability"
+        self.dashboard_state = self.root / "var" / "lib" / "arena-hero-dashboard"
         self.rollback_bin = rollback_bin
         self.env = os.environ.copy()
         self.env.update(
@@ -143,6 +145,8 @@ class SystemdDeploymentTests(unittest.TestCase):
                 "ARENA_AGENT_ENV": str(etc_root / "arena-hero-agent.env"),
                 "ARENA_RUNTIME_DIR": str(runtime_dir),
                 "ARENA_SUPERVISOR_ENV": str(etc_root / "arena-hero-supervisor.env"),
+                "ARENA_OBSERVATION_ROOT": str(self.observation_root),
+                "ARENA_DASHBOARD_STATE": str(self.dashboard_state),
                 "ARENA_SYSTEMD_UNIT_DIR": str(unit_dir),
                 "ARENA_ROLLBACK_BIN": str(rollback_bin),
                 "ARENA_SYSTEMCTL_BIN": "systemctl",
@@ -207,7 +211,7 @@ if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pip" ]; then
     case " $* " in
         *" --no-build-isolation "*)
             bin_dir=$(dirname "$0")
-            for command_name in arena-hero-agent arena-hero-health arena-hero-optimizer arena-hero-supervisor arena-hero-version-monitor; do
+            for command_name in arena-hero-agent arena-hero-dashboard arena-hero-health arena-hero-optimizer arena-hero-supervisor arena-hero-version-monitor; do
                 {
                     printf '#!%s\n' "$bin_dir/python"
                     cat <<'EOF'
@@ -287,6 +291,10 @@ exit 0
         self._write_executable(
             self.fake_bin / "useradd",
             "#!/bin/sh\nprintf 'useradd %s\\n' \"$*\" >> \"$FAKE_ACCOUNT_LOG\"\n",
+        )
+        self._write_executable(
+            self.fake_bin / "usermod",
+            "#!/bin/sh\nprintf 'usermod %s\\n' \"$*\" >> \"$FAKE_ACCOUNT_LOG\"\n",
         )
         self._write_executable(
             self.fake_bin / "install",
@@ -403,6 +411,8 @@ os.execv("/usr/bin/install", ["install", *args])
         calls = self.account_log.read_text(encoding="utf-8").splitlines()
         self.assertIn("groupadd --system arena-hero", calls)
         self.assertIn("groupadd --system arena-hero-version", calls)
+        self.assertIn("groupadd --system arena-hero-observe", calls)
+        self.assertIn("usermod -a -G arena-hero-observe arena-hero", calls)
         self.assertTrue(
             any(
                 call.startswith("useradd ")
@@ -471,6 +481,13 @@ os.execv("/usr/bin/install", ["install", *args])
         self.assertIn("StartLimitIntervalSec=0", agent_unit)
         self.assertIn("--stale-turn-timeout-seconds 90", agent_unit)
         self.assertIn("LimitCORE=0", agent_unit)
+        self.assertIn("SupplementaryGroups=arena-hero-observe", agent_unit)
+        self.assertIn(f"--observation-dir {self.observation_root}/inbox", agent_unit)
+        dashboard_unit = (self.unit_dir / "arena-hero-dashboard.service").read_text(encoding="utf-8")
+        self.assertIn(f"ARENA_DASHBOARD_DATABASE={self.dashboard_state}/dashboard.sqlite3", dashboard_unit)
+        self.assertIn(f"ARENA_DASHBOARD_INBOX={self.observation_root}/inbox", dashboard_unit)
+        self.assertIn("--host 127.0.0.1 --port 8765", dashboard_unit)
+        self.assertTrue((self._resolved("current") / "dashboard" / "index.html").is_file())
         self.assertNotIn("WorkingDirectory=/opt/arena-hero-agent", agent_unit)
         self.assertNotIn("ExecStart=/opt/arena-hero-agent", agent_unit)
         installed_rollback = self.rollback_bin.read_text(encoding="utf-8")

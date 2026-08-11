@@ -11,6 +11,9 @@ AGENT_ENV=${ARENA_AGENT_ENV:-/etc/arena-hero-agent.env}
 RUNTIME_DIR=${ARENA_RUNTIME_DIR:-/etc/arena-hero-agent}
 RUNTIME_ENV=$RUNTIME_DIR/runtime.env
 SUPERVISOR_ENV=${ARENA_SUPERVISOR_ENV:-/etc/arena-hero-supervisor.env}
+OBSERVATION_ROOT=${ARENA_OBSERVATION_ROOT:-/var/lib/arena-hero-observability}
+OBSERVATION_INBOX=$OBSERVATION_ROOT/inbox
+DASHBOARD_STATE=${ARENA_DASHBOARD_STATE:-/var/lib/arena-hero-dashboard}
 SYSTEMD_UNIT_DIR=${ARENA_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
 ROLLBACK_BIN=${ARENA_ROLLBACK_BIN:-/usr/local/sbin/arena-hero-rollback}
 SYSTEMCTL_BIN=${ARENA_SYSTEMCTL_BIN:-systemctl}
@@ -185,7 +188,7 @@ check_systemd_version() {
     fi
 }
 
-for command_name in basename cat chmod chown date dirname flock getent grep groupadd id install ln mktemp mv readlink rm sed sleep tr useradd; do
+for command_name in basename cat chmod chown cp date dirname flock getent grep groupadd id install ln mktemp mv readlink rm sed sleep tr useradd usermod; do
     require_command "$command_name"
 done
 if [ "$WITH_SUPERVISOR" -eq 1 ]; then
@@ -217,6 +220,8 @@ for deployment_path in \
     "$AGENT_ENV" \
     "$RUNTIME_DIR" \
     "$SUPERVISOR_ENV" \
+    "$OBSERVATION_ROOT" \
+    "$DASHBOARD_STATE" \
     "$SYSTEMD_UNIT_DIR" \
     "$ROLLBACK_BIN"
 do
@@ -239,6 +244,7 @@ for required_file in \
     "$PROJECT_ROOT/pyproject.toml" \
     "$PROJECT_ROOT/requirements-build.lock" \
     "$PROJECT_ROOT/requirements.lock" \
+    "$PROJECT_ROOT/dashboard/dist/index.html" \
     "$PROJECT_ROOT/scripts/rollback-systemd.sh"
 do
     if [ ! -r "$required_file" ]; then
@@ -469,8 +475,23 @@ ensure_user() {
     fi
 }
 
+if ! getent group arena-hero-observe >/dev/null 2>&1; then
+    groupadd --system arena-hero-observe
+fi
 ensure_user arena-hero
 ensure_user arena-hero-version
+if ! id arena-hero-dashboard >/dev/null 2>&1; then
+    nologin_shell=$(command -v nologin 2>/dev/null || true)
+    case "$nologin_shell" in
+        /*) ;;
+        *) nologin_shell=/bin/false ;;
+    esac
+    useradd --system --no-create-home --home-dir /nonexistent \
+        --shell "$nologin_shell" --gid arena-hero-observe arena-hero-dashboard
+fi
+usermod -a -G arena-hero-observe arena-hero
+install -d -o root -g arena-hero-observe -m 2770 "$OBSERVATION_INBOX"
+install -d -o arena-hero-dashboard -g arena-hero-observe -m 0750 "$DASHBOARD_STATE"
 if [ "$WITH_SUPERVISOR" -eq 1 ]; then
     ensure_user arena-hero-supervisor
     usermod -a -G systemd-journal arena-hero-supervisor
@@ -500,8 +521,12 @@ install -d -o root -g root -m 0755 "$BUILD_DIR"
 "$BUILD_DIR/.venv/bin/python" -m pip install --no-deps \
     --no-build-isolation "$PROJECT_ROOT"
 "$BUILD_DIR/.venv/bin/python" -m pip check
+install -d -o root -g root -m 0755 "$BUILD_DIR/dashboard"
+cp -R "$PROJECT_ROOT/dashboard/dist/." "$BUILD_DIR/dashboard/"
+chmod -R a+rX,go-w "$BUILD_DIR/dashboard"
 for command_name in \
     arena-hero-agent \
+    arena-hero-dashboard \
     arena-hero-health \
     arena-hero-optimizer \
     arena-hero-supervisor \
@@ -570,6 +595,7 @@ fi
 install -d -o root -g root -m 0755 "$SYSTEMD_UNIT_DIR" "$(dirname "$ROLLBACK_BIN")"
 for unit in \
     arena-hero-agent.service \
+    arena-hero-dashboard.service \
     arena-hero-version-monitor.service \
     arena-hero-version-monitor.timer \
     arena-hero-supervisor.service \
@@ -583,6 +609,8 @@ do
         -e "s|/etc/arena-hero-agent.env|$AGENT_ENV|g" \
         -e "s|/etc/arena-hero-agent/runtime.env|$RUNTIME_ENV|g" \
         -e "s|/etc/arena-hero-supervisor.env|$SUPERVISOR_ENV|g" \
+        -e "s|/var/lib/arena-hero-observability|$OBSERVATION_ROOT|g" \
+        -e "s|/var/lib/arena-hero-dashboard|$DASHBOARD_STATE|g" \
         "$PROJECT_ROOT/deploy/$unit" > "$TEMP_UNIT"
     chmod 0644 "$TEMP_UNIT"
     chown root:root "$TEMP_UNIT"
@@ -614,6 +642,8 @@ SUPERVISOR_WAS_ACTIVE=0
 OPTIMIZER_WAS_ACTIVE=0
 AGENT_WAS_ENABLED=0
 AGENT_WAS_ACTIVE=0
+DASHBOARD_WAS_ENABLED=0
+DASHBOARD_WAS_ACTIVE=0
 VERSION_TIMER_WAS_ENABLED=0
 VERSION_TIMER_WAS_ACTIVE=0
 SUPERVISOR_TIMER_WAS_ENABLED=0
@@ -626,6 +656,12 @@ if [ "$START_SERVICES" -eq 1 ]; then
     fi
     if "$SYSTEMCTL_BIN" is-active --quiet arena-hero-agent.service; then
         AGENT_WAS_ACTIVE=1
+    fi
+    if "$SYSTEMCTL_BIN" is-enabled --quiet arena-hero-dashboard.service; then
+        DASHBOARD_WAS_ENABLED=1
+    fi
+    if "$SYSTEMCTL_BIN" is-active --quiet arena-hero-dashboard.service; then
+        DASHBOARD_WAS_ACTIVE=1
     fi
     if "$SYSTEMCTL_BIN" is-enabled --quiet arena-hero-version-monitor.timer; then
         VERSION_TIMER_WAS_ENABLED=1
@@ -681,6 +717,9 @@ activate_services() {
     "$SYSTEMCTL_BIN" enable arena-hero-agent.service || return 1
     "$SYSTEMCTL_BIN" restart arena-hero-agent.service || return 1
     wait_for_health || return 1
+    if [ "$DASHBOARD_WAS_ACTIVE" -eq 1 ]; then
+        "$SYSTEMCTL_BIN" restart arena-hero-dashboard.service || return 1
+    fi
     if [ "$WITH_SUPERVISOR" -eq 1 ]; then
         "$SYSTEMCTL_BIN" enable --now arena-hero-supervisor.timer || return 1
         "$SYSTEMCTL_BIN" start arena-hero-supervisor.service || return 1
@@ -729,6 +768,12 @@ restore_old_release() {
             "$SYSTEMCTL_BIN" restart arena-hero-agent.service || return 1
         else
             "$SYSTEMCTL_BIN" stop arena-hero-agent.service || return 1
+        fi
+        restore_enablement arena-hero-dashboard.service "$DASHBOARD_WAS_ENABLED" || return 1
+        if [ -n "$OLD_CURRENT" ] && [ "$DASHBOARD_WAS_ACTIVE" -eq 1 ]; then
+            "$SYSTEMCTL_BIN" restart arena-hero-dashboard.service || return 1
+        else
+            "$SYSTEMCTL_BIN" stop arena-hero-dashboard.service || return 1
         fi
         restore_timer_state arena-hero-version-monitor.timer \
             "$VERSION_TIMER_WAS_ENABLED" "$VERSION_TIMER_WAS_ACTIVE" || return 1

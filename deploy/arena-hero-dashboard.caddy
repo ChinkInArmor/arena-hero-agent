@@ -1,0 +1,35 @@
+arena.911439925.xyz {
+    encode zstd gzip
+
+    basic_auth {
+        arena-admin {$ARENA_DASHBOARD_PASSWORD_HASH}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8765 {
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    log {
+        output file /var/log/caddy/arena-dashboard-access.log {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 168h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>headers>Authorization delete
+            }
+        }
+    }
+}

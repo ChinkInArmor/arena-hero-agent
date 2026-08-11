@@ -1,0 +1,50 @@
+[Unit]
+Description=Arena Hero read-only operations Dashboard
+After=network.target arena-hero-agent.service
+Wants=arena-hero-agent.service
+
+[Service]
+Type=simple
+User=arena-hero-dashboard
+Group=arena-hero-observe
+WorkingDirectory=/opt/arena-hero-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=ARENA_DASHBOARD_DATABASE=/var/lib/arena-hero-dashboard/dashboard.sqlite3
+Environment=ARENA_DASHBOARD_INBOX=/var/lib/arena-hero-observability/inbox
+Environment=ARENA_DASHBOARD_RELEASE=/opt/arena-hero-agent/current
+Environment=ARENA_DASHBOARD_STATIC_DIR=/opt/arena-hero-agent/current/dashboard
+ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-dashboard --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+MemoryHigh=192M
+MemoryMax=256M
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/arena-hero-agent /var/lib/arena-hero-observability
+ReadWritePaths=/var/lib/arena-hero-dashboard
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arena-hero-dashboard
+
+[Install]
+WantedBy=multi-user.target
