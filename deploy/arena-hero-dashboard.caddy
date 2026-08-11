@@ -1,20 +1,22 @@
 arena.911439925.xyz {
     encode zstd gzip
 
-    basic_auth {
-        arena-admin {$ARENA_DASHBOARD_PASSWORD_HASH}
-    }
+    route {
+        header {
+            Strict-Transport-Security "max-age=31536000; includeSubDomains"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            Referrer-Policy "no-referrer"
+            Permissions-Policy "camera=(), microphone=(), geolocation=()"
+            -Server
+        }
 
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        Referrer-Policy "no-referrer"
-        Permissions-Policy "camera=(), microphone=(), geolocation=()"
-        -Server
-    }
+        basic_auth {
+            arena-admin {$ARENA_DASHBOARD_PASSWORD_HASH}
+        }
 
-    reverse_proxy 127.0.0.1:8765
+        reverse_proxy 127.0.0.1:8765
+    }
 
     log {
         format filter {
