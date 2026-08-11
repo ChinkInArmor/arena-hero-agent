@@ -6,19 +6,19 @@
 [![发布镜像](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
 [![许可证](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
 
-这是一个面向 [Arena Hero](https://doc.arenahero.io/zh-Hans/) 的确定性、资源优先长期运行 Agent。项目采用分层威胁控制器和官方 `arena-hero` Python SDK，可在本地、Docker 或 Linux systemd 环境运行。
+这是一个面向 [Arena Hero](https://doc.arenahero.io/zh-Hans/) 的混合式长期运行 Agent。确定性代码负责 Tick 内战术，动态本地规划器以及可选的低频模型顾问负责调整可持续经济和领土扩张参数。项目使用官方 `arena-hero` Python SDK，可在本地、Docker 或 Linux systemd 环境运行。
 
 这是社区项目，并非 Arena Hero 官方产品。
 
 ## 主要能力
 
-- 先建立经过验证的 `12 Worker + 3 Vanguard + 4 Ranger = 19` 基础编制；最近交付吞吐足够时，再按动态价格谨慎增长到 24 人，并保留一个紧急防御人口槽。
+- 先建立经过验证的 `12 Worker + 3 Vanguard + 4 Ranger = 19` 基础编制；证据不足时保持保守的 24 人方案，吞吐、满仓、领土机会和动态价格支持时再进行有上限的混合编制扩张。
 - Core 主动远离信标，以采集和生存为主，同时让防卫单位分层保护，避免堵塞 Core 路线。
 - 将生命周期、威胁等级和单位任务独立分类，覆盖活动警戒、提前撤离、交战、多轴突围和远征队归队。
 - 对地图陈旧区域进行侦察，记忆资源点，安排返程交付，并在损失后回收掉落资源。
 - 遇到活跃敌方舰队时优先拉扯避战；对确认静止且孤立的威胁或 Core 执行有限清除。
 - 定时检测游戏规则和 SDK 版本，发现不兼容时进入保守模式。
-- 大模型不参与每个 Tick 的决策。可选模型只在异常触发后分析监督报告。
+- 大模型不直接生成每 Tick 动作。可选后台顾问每 128-512 Tick 仅返回经过严格校验且会过期的战略参数；无密钥、超时、非法输出或供应商故障时自动使用本地策略。
 
 ## 环境要求
 
@@ -157,7 +157,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

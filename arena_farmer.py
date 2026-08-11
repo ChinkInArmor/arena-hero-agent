@@ -19,6 +19,16 @@ from typing import Protocol
 from uuid import UUID
 
 from arena_health import write_heartbeat
+from arena_strategy import (
+    AdviserConfig,
+    AsyncStrategicAdviser,
+    BASELINE_PARAMETERS,
+    StrategicContext,
+    StrategicController,
+    resource_assignment_cost,
+    scout_candidate_score,
+    select_marginal_unit,
+)
 from arena_hero import (
     APIError,
     ArenaHeroClient,
@@ -52,8 +62,6 @@ EARLY_DEFENSE_RESERVE = 15
 LONG_TERM_DEFENSE_RESERVE = 15
 BASELINE_VANGUARD_TARGET = 3
 BASELINE_RANGER_TARGET = 4
-ECONOMIC_WORKER_LIMIT = 17
-STEADY_POPULATION_LIMIT = 24
 ABSOLUTE_POPULATION_LIMIT = 25
 EMERGENCY_VANGUARD_TARGET = 4
 EMERGENCY_RANGER_TARGET = 5
@@ -99,7 +107,6 @@ STATIONARY_CORE_MEMORY_TTL = 256
 RESOURCE_MEMORY_TTL = 64
 RESOURCE_STALL_TICKS = 6
 RESOURCE_COOLDOWN_TICKS = 8
-RESOURCE_ASSIGNMENT_STICKY_BONUS = 2
 SCOUT_STALL_TICKS = 3
 RECOVERY_TICKS = 160
 RECOVERY_MIN_WORKERS = 6
@@ -1495,6 +1502,7 @@ class CoreFarmer:
         worker_target: int = DEFAULT_WORKER_TARGET,
         beacon_policy: str = DEFAULT_BEACON_POLICY,
         compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
+        strategic_adviser: AsyncStrategicAdviser | None = None,
     ) -> None:
         if not 1 <= worker_target <= MAX_WORKER_TARGET:
             raise ValueError(
@@ -1506,12 +1514,17 @@ class CoreFarmer:
         self.beacon_policy = beacon_policy
         self.compatibility_marker = compatibility_marker
         self.compatibility_hold = False
+        self.strategic_controller = StrategicController(strategic_adviser)
+        self.strategic_parameters = BASELINE_PARAMETERS
+        self._strategic_context: StrategicContext | None = None
+        self._last_core_position: Position | None = None
         self.known_obstacles: set[Position] = set()
         self.scout_slots: dict[UUID, int] = {}
         self.scout_stages: dict[UUID, int] = {}
         self.scout_progress: dict[UUID, ScoutProgress] = {}
         self.scout_target_last_visited: dict[Position, int] = {}
         self.scout_claims: set[Position] = set()
+        self.dedicated_scout_ids: set[UUID] = set()
         self.scout_chunk_last_seen: dict[Position, int] = {}
         self.worker_history: dict[UUID, deque[Position]] = {}
         self.resource_last_seen: dict[Position, int] = {}
@@ -1564,6 +1577,7 @@ class CoreFarmer:
         self.optional_spawn_retry_until_tick = 0
         self.pending_optional_spawn = False
         self.pending_optional_spawn_tick: int | None = None
+        self.pending_optional_unit_type = UnitType.WORKER
         self.pending_conditional_spawn = False
         self.pending_conditional_spawn_tick: int | None = None
         self.conditional_spawn_retry_until_tick = 0
@@ -1630,11 +1644,12 @@ class CoreFarmer:
                     else None
                 )
                 target_id = getattr(spawn_result, "target_id", None)
+                expected_type = self.pending_optional_unit_type
                 observed_target = any(
-                    unit.id == target_id and unit.unit_type is UnitType.WORKER
-                    for unit in turn.workers
+                    unit.id == target_id and unit.unit_type is expected_type
+                    for unit in turn.units
                 )
-                if unit_type in {None, UnitType.WORKER.value}:
+                if unit_type in {None, expected_type.value}:
                     confirmed_success = (
                         spawn_result.event_type == "CORE_SPAWN_SUCCEEDED"
                         and observed_target
@@ -1646,6 +1661,7 @@ class CoreFarmer:
                         self.pending_optional_spawn_tick = None
                         if confirmed_success:
                             self.last_optional_spawn_tick = turn.tick
+                            self.pending_optional_unit_type = UnitType.WORKER
                         else:
                             self.optional_spawn_retry_until_tick = (
                                 turn.tick + GROWTH_SPAWN_BACKOFF_TICKS
@@ -1719,6 +1735,51 @@ class CoreFarmer:
             deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
             and blocked_ticks == 0
         )
+
+    def _refresh_strategic_parameters(self, turn: Turn) -> None:
+        window_start = turn.tick - GROWTH_WINDOW_TICKS + 1
+        self._last_core_position = turn.core.position if turn.core is not None else None
+        context = StrategicContext(
+            tick=turn.tick,
+            resources=turn.resources,
+            resource_capacity=turn.resource_capacity,
+            population=turn.state.population,
+            workers=len(turn.workers),
+            vanguards=len(turn.vanguards),
+            rangers=len(turn.rangers),
+            deposits_window=sum(
+                amount
+                for tick, amount in self.economic_deposit_history
+                if tick >= window_start
+            ),
+            blocked_ticks=sum(
+                int(blocked)
+                for tick, blocked in self.economic_blocked_history
+                if tick >= window_start
+            ),
+            known_resources=len(self.resource_last_seen),
+            scout_chunks=len(self.scout_chunk_last_seen),
+            visible_enemies=len(turn.visible_enemies),
+            visible_enemy_cores=sum(
+                getattr(enemy, "kind") == "CORE"
+                for enemy in turn.visible_enemies
+            ),
+            beacon_distance=(
+                _distance(turn.core.position, turn.beacon.position)
+                if turn.core is not None
+                else 0
+            ),
+            beacon_contest_enabled=self.beacon_policy == "pursue",
+            threat_level=self.threat_assessment.level.value,
+            recovery=self.recovery_mode,
+            compatibility_hold=self.compatibility_hold,
+        )
+        self._strategic_context = context
+        self.strategic_parameters = self.strategic_controller.update(context)
+
+    def observe_accepted_strategy(self) -> None:
+        if self._strategic_context is not None:
+            self.strategic_controller.observe_accepted(self._strategic_context)
 
     def _post_combat_price_is_usable(
         self,
@@ -2839,14 +2900,19 @@ class CoreFarmer:
                     row.append(forbidden_cost)
                     continue
                 age = tick - self.resource_last_seen[cell]
-                stale_penalty = 0 if age == 0 else min(6, 2 + age // 8)
-                sticky_bonus = (
-                    RESOURCE_ASSIGNMENT_STICKY_BONUS
-                    if self.resource_intents.get(worker.id) == cell
-                    else 0
-                )
                 row.append(
-                    max(0, path_cost + stale_penalty - sticky_bonus)
+                    resource_assignment_cost(
+                        path_cost=path_cost,
+                        resource_age=age,
+                        resource_quota=_chunk_resource_quota(cell),
+                        core_distance=(
+                            _distance(cell, self._last_core_position)
+                            if self._last_core_position is not None
+                            else path_cost
+                        ),
+                        sticky=self.resource_intents.get(worker.id) == cell,
+                        parameters=self.strategic_parameters,
+                    )
                 )
             row.extend([unassigned_cost] * len(ordered_workers))
             cost_matrix.append(row)
@@ -2959,13 +3025,22 @@ class CoreFarmer:
         target = min(
             candidates,
             key=lambda candidate: (
-                self.scout_chunk_last_seen.get(
-                    _chunk_coordinates(candidate),
-                    -1,
+                *scout_candidate_score(
+                    chunk_last_seen=self.scout_chunk_last_seen.get(
+                        _chunk_coordinates(candidate), -1
+                    ),
+                    target_last_visited=self.scout_target_last_visited.get(
+                        candidate, -1
+                    ),
+                    resource_quota=_chunk_resource_quota(candidate),
+                    core_distance=_distance(core_position, candidate),
+                    beacon_distance=(
+                        _distance(candidate, beacon_position)
+                        if beacon_position is not None
+                        else 0
+                    ),
+                    parameters=self.strategic_parameters,
                 ),
-                self.scout_target_last_visited.get(candidate, -1),
-                -_chunk_resource_quota(candidate),
-                _distance(core_position, candidate),
                 candidate[0],
                 candidate[1],
             ),
@@ -3206,6 +3281,7 @@ class CoreFarmer:
         self._refresh_compatibility_hold()
         self.known_obstacles.update(turn.obstacle_cells)
         self._refresh_threat_assessment(turn)
+        self._refresh_strategic_parameters(turn)
         self.stationary_unit_target_id = None
         active_raid_target = self._active_raid_target_for_recall()
         if self.combat_pressure_active and active_raid_target is not None:
@@ -3318,8 +3394,39 @@ class CoreFarmer:
             if observer_position is not None
             else None
         )
+        scout_candidates = [
+            worker
+            for worker in empty_workers
+            if worker.id != observer_id and worker.position not in turn.resource_cells
+        ]
+        if (
+            self.strategic_parameters.posture.value != "CONSOLIDATE"
+            and len(scout_candidates) >= 4
+        ):
+            dedicated_scout_count = max(
+                1,
+                len(scout_candidates)
+                * self.strategic_parameters.scout_percent
+                // 100,
+            )
+            self.dedicated_scout_ids = {
+                worker.id
+                for worker in sorted(
+                    scout_candidates,
+                    key=lambda worker: (
+                        self.scout_slots.get(worker.id, 0),
+                        _uuid_sort_key(worker),
+                    ),
+                    reverse=True,
+                )[:dedicated_scout_count]
+            }
+        else:
+            self.dedicated_scout_ids.clear()
         economic_empty_workers = [
-            worker for worker in empty_workers if worker.id != observer_id
+            worker
+            for worker in empty_workers
+            if worker.id != observer_id
+            and worker.id not in self.dedicated_scout_ids
         ]
         preplanned_units = _queue_core_defender_egress(
             turn,
@@ -3518,8 +3625,8 @@ class CoreFarmer:
         self._record_economic_blocking(turn)
         self._control_core(turn, context, combat_target)
 
-    @staticmethod
     def _strike_group_ids(
+        self,
         turn: Turn,
         target: object | None,
     ) -> tuple[set[UUID], set[UUID]]:
@@ -3532,12 +3639,14 @@ class CoreFarmer:
                 {
                     unit.id
                     for unit in vanguards[
-                        VANGUARD_CORE_GUARDS:DEFENSE_VANGUARD_TARGET
+                        VANGUARD_CORE_GUARDS:self.strategic_parameters.vanguard_target
                     ]
                 },
                 {
                     unit.id
-                    for unit in rangers[RANGER_CORE_GUARDS:DEFENSE_RANGER_TARGET]
+                    for unit in rangers[
+                        RANGER_CORE_GUARDS:self.strategic_parameters.ranger_target
+                    ]
                 },
             )
 
@@ -4322,7 +4431,8 @@ class CoreFarmer:
         can_spawn = (
             not self.compatibility_hold
             and context.friendly_counts[core.position] < 2
-            and population < ABSOLUTE_POPULATION_LIMIT
+            and population
+            < max(ABSOLUTE_POPULATION_LIMIT, self.strategic_parameters.population_limit)
         )
         nearest_threat = min(
             (
@@ -4516,28 +4626,46 @@ class CoreFarmer:
                     core.spawn(UnitType.RANGER)
                     return
 
+            strategic_unit_name = select_marginal_unit(
+                workers=len(turn.workers),
+                vanguards=len(turn.vanguards),
+                rangers=len(turn.rangers),
+                worker_cost=production_budget.worker_cost,
+                vanguard_cost=production_budget.vanguard_cost,
+                ranger_cost=production_budget.ranger_cost,
+                parameters=self.strategic_parameters,
+            )
+            strategic_unit = (
+                UnitType(strategic_unit_name)
+                if strategic_unit_name is not None
+                else None
+            )
+            strategic_cost = (
+                unit_cost(strategic_unit, population)
+                if strategic_unit is not None
+                else 0
+            )
             growth_reserve = CORE_RESOURCE_RESERVE + unit_cost(
-                UnitType.RANGER,
-                population + 1,
+                UnitType.RANGER, population + 1
             )
             if (
-                population < STEADY_POPULATION_LIMIT
+                strategic_unit is not None
+                and population < self.strategic_parameters.population_limit
                 and len(turn.workers) >= self.worker_target
-                and len(turn.workers) < ECONOMIC_WORKER_LIMIT
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) >= DEFENSE_RANGER_TARGET
                 and nearest_threat is None
                 and self._growth_is_ready(
                     turn,
-                    next_worker_cost=production_budget.worker_cost,
+                    next_worker_cost=strategic_cost,
                     cargo_waiting=cargo_waiting,
                 )
-                and production_budget.resources
-                >= production_budget.worker_cost + growth_reserve
+                and production_budget.resources >= strategic_cost + growth_reserve
             ):
-                core.spawn(UnitType.WORKER)
+                core.spawn(strategic_unit)
                 self.pending_optional_spawn = True
                 self.pending_optional_spawn_tick = turn.tick
+                self.pending_optional_unit_type = strategic_unit
                 return
 
         if cargo_waiting:
@@ -4859,6 +4987,7 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"delivery_blocked={delivery_blocked} "
         f"resource_blocked={resource_blocked} "
         f"scout_chunks={len(tactic.scout_chunk_last_seen)} "
+        f"dedicated_scouts={len(tactic.dedicated_scout_ids)} "
         f"scout_oldest_age={scout_oldest_age} "
         f"captured_resources={captured_resources} "
         f"capture_destroyed={capture_destroyed} "
@@ -4955,6 +5084,9 @@ def _systemd_status(turn: Turn, tactic: CoreFarmer, accepted_tick: int) -> str:
         f"enemies {len(turn.visible_enemies)}; {core_health}; "
         f"worker_target {tactic.worker_target}; "
         f"beacon_policy {tactic.beacon_policy}; "
+        f"strategy_posture {tactic.strategic_parameters.posture.value}; "
+        f"strategy_source {tactic.strategic_parameters.source}; "
+        f"strategy_population_limit {tactic.strategic_parameters.population_limit}; "
         f"compatibility_hold {int(tactic.compatibility_hold)}; "
         f"tuning_generation {tuning_generation}"
     )
@@ -5025,6 +5157,35 @@ class _AcceptedTurnWatchdog:
             return
 
 
+def _strategic_adviser_from_environment() -> AsyncStrategicAdviser | None:
+    provider = os.environ.get("ARENA_STRATEGY_PROVIDER", "disabled").strip().lower()
+    if provider in {"", "disabled", "off", "false", "0"}:
+        return None
+    base_url = os.environ.get("ARENA_STRATEGY_BASE_URL", "").strip()
+    model = os.environ.get("ARENA_STRATEGY_MODEL", "").strip()
+    key_file_value = os.environ.get("ARENA_STRATEGY_API_KEY_FILE", "").strip()
+    key_file = Path(key_file_value) if key_file_value else None
+    try:
+        interval_ticks = int(
+            os.environ.get("ARENA_STRATEGY_INTERVAL_TICKS", "256").strip()
+        )
+        timeout_seconds = float(
+            os.environ.get("ARENA_STRATEGY_TIMEOUT_SECONDS", "8").strip()
+        )
+    except ValueError as exc:
+        raise ValueError("strategy adviser interval and timeout must be numeric") from exc
+    return AsyncStrategicAdviser(
+        AdviserConfig(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key_file=key_file,
+            interval_ticks=interval_ticks,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+
+
 def play(
     api_key: str,
     *,
@@ -5034,6 +5195,7 @@ def play(
     compatibility_marker: Path | None = DEFAULT_COMPATIBILITY_MARKER,
     heartbeat_file: Path | None = None,
     stale_turn_timeout_seconds: float = DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
+    strategic_adviser: AsyncStrategicAdviser | None = None,
 ) -> None:
     if (
         not math.isfinite(stale_turn_timeout_seconds)
@@ -5044,6 +5206,7 @@ def play(
         worker_target=worker_target,
         beacon_policy=beacon_policy,
         compatibility_marker=compatibility_marker,
+        strategic_adviser=strategic_adviser,
     )
     last_accepted_tick: int | None = None
     resource_ledger_snapshot: ResourceLedgerSnapshot | None = None
@@ -5082,6 +5245,7 @@ def play(
                         continue
                     raise
                 last_accepted_tick = accepted.tick
+                tactic.observe_accepted_strategy()
                 watchdog.mark_accepted()
                 resource_ledger_snapshot = _resource_ledger_snapshot(turn)
                 _notify_systemd(
@@ -5108,6 +5272,10 @@ def play(
                         f"recovery={int(tactic.recovery_mode)} phase={tactic.strategy_phase(turn)} "
                         f"worker_target={tactic.worker_target} "
                         f"beacon_policy={tactic.beacon_policy} "
+                        f"strategy_posture={tactic.strategic_parameters.posture.value} "
+                        f"strategy_source={tactic.strategic_parameters.source} "
+                        f"strategy_population_limit={tactic.strategic_parameters.population_limit} "
+                        f"strategy_adviser={tactic.strategic_controller.adviser.last_outcome if tactic.strategic_controller.adviser else 'disabled'} "
                         f"tuning_generation={os.environ.get('ARENA_TUNING_GENERATION', '0').strip() or '0'} "
                         f"core_hp={turn.core.hp if turn.core else 'none'} "
                         f"core_shield={turn.core.shield if turn.core else 'none'} "
@@ -5165,7 +5333,9 @@ def _is_transient_api_error(exc: APIError) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    strategic_adviser: AsyncStrategicAdviser | None = None
     try:
+        strategic_adviser = _strategic_adviser_from_environment()
         api_key = load_api_key(env_file=args.env_file)
         play(
             api_key,
@@ -5175,6 +5345,7 @@ def main(argv: list[str] | None = None) -> int:
             compatibility_marker=args.compatibility_marker,
             heartbeat_file=args.heartbeat_file,
             stale_turn_timeout_seconds=args.stale_turn_timeout_seconds,
+            strategic_adviser=strategic_adviser,
         )
 
     except KeyboardInterrupt:
@@ -5201,6 +5372,9 @@ def main(argv: list[str] | None = None) -> int:
     except ArenaHeroError as exc:
         print(f"Arena Hero agent stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         return AGENT_EXIT_CODE
+    finally:
+        if strategic_adviser is not None:
+            strategic_adviser.close()
     return 0
 
 

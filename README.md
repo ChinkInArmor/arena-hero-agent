@@ -6,19 +6,19 @@
 [![Release image](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml/badge.svg)](https://github.com/Drew-Z/arena-hero-agent/actions/workflows/release.yml)
 [![License](https://img.shields.io/github/license/Drew-Z/arena-hero-agent)](LICENSE)
 
-A deterministic, resource-first long-running agent for [Arena Hero](https://doc.arenahero.io/). It uses a hierarchical threat controller and the official `arena-hero` Python SDK, keeps decisions inside the 15-second Tick window, and can run locally, in Docker, or as hardened systemd services.
+A hybrid, long-running agent for [Arena Hero](https://doc.arenahero.io/). Deterministic code owns Tick-critical tactics while a dynamic local planner, and optionally a low-frequency model adviser, tunes sustainable economic and territorial expansion. It uses the official `arena-hero` Python SDK and can run locally, in Docker, or as hardened systemd services.
 
 This is a community project and is not an official Arena Hero product.
 
 ## Highlights
 
-- Builds a proven `12 Workers + 3 Vanguards + 4 Rangers = 19` baseline, then grows conservatively to 24 population when recent deposits justify the next dynamic price tier; one additional slot is reserved for emergency defense.
+- Builds a proven `12 Workers + 3 Vanguards + 4 Rangers = 19` baseline, preserves the conservative 24-population profile while evidence is weak, and opens bounded mixed-fleet growth when throughput, storage, territory, and current dynamic prices justify it.
 - Moves the Core away from the Beacon, prioritizes collection and survival, and maintains distributed Core defense.
 - Classifies lifecycle, threat, and Unit missions independently, including activity alerts, pre-evasion, engagement, multi-axis breakout, and detached-squad return.
 - Scouts stale map regions, tracks resource memory, returns cargo, and recovers dropped cargo after losses.
 - Avoids active enemy fleets while opportunistically clearing confirmed stationary threats or isolated Cores.
 - Detects game/SDK compatibility changes before unattended play continues.
-- Keeps AI out of the per-Tick control loop. Optional model review only analyzes anomaly reports after the fact.
+- Keeps AI out of the per-Tick action loop. An optional asynchronous adviser may return only validated strategic parameters every 128-512 Ticks; no key, timeout, invalid output, and provider failure all fall back to the local planner.
 
 ```mermaid
 flowchart LR
@@ -146,15 +146,17 @@ sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
-## AI Monitoring Is Optional
+## AI Is Optional
 
-The main Agent never needs a model. The supervisor always runs deterministic checks first. It calls a model only when all of these are true:
+The main Agent never needs a model. Its optional strategic adviser runs in a background thread and can change only a strict, expiring parameter schema; deterministic code still owns legality, pathfinding, combat, economy execution, emergency defense, and submission. OpenAI-compatible services (including GPT, DeepSeek, Ollama, and vLLM) and Anthropic are supported. Model credentials are separate key files and are never CLI values or ordinary environment-file secrets. See [hybrid strategic control](docs/hybrid-strategy.md).
+
+The separate supervisor always runs deterministic checks first. It calls a model only when all of these are true:
 
 1. `ARENA_SUPERVISOR_AI_ENABLED=true` is explicitly set.
 2. A deterministic anomaly trigger fires.
 3. The base URL, API key, and at least one model ID are configured.
 
-Model output is advisory and read-only. It cannot submit game plans, rewrite the tactic, or restart the Agent. See [configuration](docs/configuration.md) for provider settings.
+Supervisor output is advisory and read-only. It cannot submit game plans, rewrite the tactic, or restart the Agent. See [configuration](docs/configuration.md) for both model channels.
 
 The separate optimizer can update a narrow runtime configuration and restart the systemd service. It runs as root by design and is disabled by default.
 
@@ -191,7 +193,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

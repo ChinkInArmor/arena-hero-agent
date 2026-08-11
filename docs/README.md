@@ -8,6 +8,8 @@ Use the document that matches the task:
   installation, operations, rollback, and uninstall procedures.
 - [Strategy](strategy.md): deterministic resource, survival, defense, scouting,
   and bounded-combat policy.
+- [Hybrid strategic control](hybrid-strategy.md): dynamic local planning,
+  influence scoring, marginal production, and the optional model adviser.
 - [v0.14 economic strategy upgrade](v0.14-economic-strategy-upgrade.md):
   approved requirements and acceptance criteria for adapting the production
   policy to population-based Unit prices.

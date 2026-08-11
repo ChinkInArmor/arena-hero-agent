@@ -3324,6 +3324,59 @@ class CoreFarmerTests(unittest.TestCase):
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertNotEqual(queued.get("core_action", {}).get("unit_type"), "WORKER")
 
+    def test_saturated_population_24_opens_dynamic_growth(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 25)
+        ]
+        tactic = CoreFarmer(beacon_policy="hold")
+        for tick in range(100, 132):
+            tactic.economic_blocked_history.append((tick, False))
+        turn = make_turn(
+            tick=132,
+            resources=120,
+            population=24,
+            units=self._mature_units() + extra_workers,
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(tactic.strategic_parameters.source, "local-expand")
+        self.assertEqual(tactic.strategic_parameters.population_limit, 30)
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+
+    def test_expansion_reserves_a_stable_scout_fraction(self) -> None:
+        extra_workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(20, 25)
+        ]
+        tactic = CoreFarmer(beacon_policy="hold")
+        turn = make_turn(
+            tick=132,
+            resources=120,
+            population=24,
+            units=self._mature_units() + extra_workers,
+            resource_cells=[(30 + index, 30) for index in range(17)],
+        )
+        tactic.choose_actions(turn)
+
+        self.assertEqual(tactic.strategic_parameters.source, "local-expand")
+        self.assertEqual(len(tactic.dedicated_scout_ids), 5)
+        self.assertTrue(
+            tactic.dedicated_scout_ids.isdisjoint(tactic.resource_intents)
+        )
+
     def test_emergency_defense_can_use_reserved_population_slot(self) -> None:
         extra_workers = [
             unit(

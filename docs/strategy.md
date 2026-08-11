@@ -1,32 +1,34 @@
 # Strategy Profile
 
-The default profile optimizes for long-term Core survival and resource accumulation rather than Beacon progress or indiscriminate combat.
+The default profile optimizes sustainable economic and territorial expansion
+under a deterministic safety envelope. Leaderboard events are useful outcomes,
+but they do not replace economy, map control, or fleet survivability as the sole
+objective.
 
 ## Population Plan
 
-Production has three bounded layers:
+Production has a validated baseline and evidence-driven strategic growth:
 
 | Layer | Profile | Policy |
 | --- | --- | --- |
 | Baseline | `12 Worker + 3 Vanguard + 4 Ranger = 19` | Preserve the validated collection and defense envelope. |
-| Economic growth | Up to `17 Worker + 3 Vanguard + 4 Ranger = 24` | Add one Worker only after a 32-Tick, low-congestion deposit window pays at least twice the next dynamic Worker price. |
-| Emergency slot | Maximum population `25` | Permit one extra Vanguard or Ranger only for an immediate measured threat after safe evasion cannot be started. |
+| Conservative growth | Up to 24 population | Retain the prior local profile while evidence is weak. |
+| Territorial growth | Bounded local limit up to 30 | Open only after saturated storage or a productive, low-congestion economic window. |
+| Pressure growth | Bounded local limit up to 32 | Shift marginal purchases toward combat when an enemy Core provides an authoritative opportunity. |
+| Emergency defense | At least the legacy population-25 slot | Permit a measured defender after safe evasion cannot be started. |
 
 The Agent calls the official SDK `unit_cost(unit_type, turn.state.population)`
-for every production and reserve comparison. It keeps a Core reserve plus the
-next Ranger price before optional growth, and it reserves the worst legal spend
-for Unit healing already present in the submitted plan. At a price-tier boundary,
-an immediate defender replacement may be conditionally submitted when one
-combat loss would make it affordable; without that loss the server rejects the
-conditional action and the Agent backs off. It never treats a queued spawn as
-successful; the next authoritative state and matching spawn event must confirm
-whether growth occurred.
+for every production and reserve comparison. Optional production scores Worker,
+Vanguard, and Ranger target deficits against current price and strategic utility,
+so late growth is not a fixed Worker-only sequence. It keeps a Core reserve plus
+the next Ranger price and reserves the worst legal Unit-healing spend already in
+the plan. It never treats a queued spawn as successful; the next authoritative
+state and matching spawn event must confirm the expected Unit type.
 
-Optional growth is disabled for explicitly smaller Worker profiles. The default
-12-Worker profile can remain at 19 when deposits, congestion, recovery, threat,
-or compatibility uncertainty do not justify the next purchase. Population 25 is
-a named absolute bound, not a target, and the Agent never self-destructs to
-rebalance a full fleet.
+Explicitly smaller Worker profiles still disable optional growth. The default
+profile can remain at 19 or 24 when deposits, congestion, recovery, threat, or
+compatibility uncertainty do not justify another purchase. The local planner
+never intentionally self-destructs Units to force a composition change.
 
 ## Core Safety
 

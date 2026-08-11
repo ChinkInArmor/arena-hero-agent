@@ -41,6 +41,7 @@ arena-hero-health = "arena_health:main"
 [tool.setuptools]
 py-modules = [
     "arena_farmer",
+    "arena_strategy",
     "arena_optimizer",
     "arena_supervisor",
     "arena_version_monitor",

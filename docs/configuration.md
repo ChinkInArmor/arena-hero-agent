@@ -51,6 +51,32 @@ ARENA_TUNING_GENERATION=0
 
 The main service reads the first two as CLI arguments. The generation value is emitted in diagnostics so optimizer changes can be correlated with logs.
 
+## Hybrid Strategy And Optional Adviser
+
+The main Agent always runs a deterministic strategic planner. It begins with the
+validated 24-population profile, then uses economic throughput, storage
+saturation, congestion, map coverage, threats, and current dynamic Unit prices
+to choose bounded long-term parameters. Pathfinding, action legality, emergency
+defense, and plan submission remain deterministic.
+
+An optional model adviser can update strategic parameters asynchronously. It is
+disabled unless `ARENA_STRATEGY_PROVIDER` is configured.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ARENA_STRATEGY_PROVIDER` | `disabled` | `openai-compatible` or `anthropic`. |
+| `ARENA_STRATEGY_BASE_URL` | none | Provider API base URL. |
+| `ARENA_STRATEGY_MODEL` | none | Provider model ID. |
+| `ARENA_STRATEGY_API_KEY_FILE` | none | Separate read-only credential file; omit for an unauthenticated local endpoint. |
+| `ARENA_STRATEGY_INTERVAL_TICKS` | `256` | Request cadence, restricted to 128-512 Tick numbers. |
+| `ARENA_STRATEGY_TIMEOUT_SECONDS` | `8` | Background HTTP timeout, greater than 0 and at most 12 seconds. |
+
+The key file must not be an ordinary environment file, CLI value, or repository
+file. Anthropic requires it. OpenAI-compatible local Ollama/vLLM endpoints may
+run without it. Invalid, expired, late, or failed advice is ignored, and actual
+threat/recovery/compatibility state always overrides model posture. See
+[hybrid strategic control](hybrid-strategy.md) for the schema and failure model.
+
 ## Deterministic Supervisor
 
 The supervisor reads the current systemd invocation's journal and writes structured reports under `/var/lib/arena-hero-supervisor`. It has no game credential and no plan-submission path.
