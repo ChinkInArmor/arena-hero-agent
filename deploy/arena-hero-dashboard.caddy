@@ -14,17 +14,9 @@ arena.911439925.xyz {
         -Server
     }
 
-    reverse_proxy 127.0.0.1:8765 {
-        header_up X-Forwarded-Host {host}
-        header_up X-Forwarded-Proto {scheme}
-    }
+    reverse_proxy 127.0.0.1:8765
 
     log {
-        output file /var/log/caddy/arena-dashboard-access.log {
-            roll_size 10MiB
-            roll_keep 5
-            roll_keep_for 168h
-        }
         format filter {
             wrap json
             fields {
