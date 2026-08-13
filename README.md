@@ -19,6 +19,7 @@ This is a community project and is not an official Arena Hero product.
 - Avoids active enemy fleets while opportunistically clearing confirmed stationary threats or isolated Cores.
 - Detects game/SDK compatibility changes before unattended play continues.
 - Keeps AI out of the per-Tick action loop. An optional asynchronous adviser may return only validated strategic parameters every 128-512 Ticks; no key, timeout, invalid output, and provider failure all fall back to the local planner.
+- Optional authenticated tactical command console: private live map and 48-hour replay, unit coordinate dispatch, Core movement requests, command cancellation, expeditions, production weights, audit receipts, and AUTO/MANUAL/EXPEDITION/EMERGENCY control states. The browser only enqueues fixed-schema commands; the Agent stays the sole SDK action executor.
 
 ```mermaid
 flowchart LR
@@ -146,13 +147,23 @@ sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
-### Read-only operations Dashboard
+### Operations Dashboard and tactical command console
 
-The optional FastAPI/React Dashboard exposes redacted health, economy, fleet,
-strategy, adviser, trend, and event data through a loopback-only service. It has
-no game-control, command, credential, raw-log, or service-action endpoint. The
+The optional FastAPI/React operations Dashboard exposes redacted health, economy,
+fleet, strategy, adviser, trend, and event data through a loopback-only service.
+It has no game-control, credential, raw-log, or service-action endpoint. The
 supported public edge is Cloudflare proxy to Caddy HTTPS and Basic Auth. See
 [Dashboard deployment and isolation](docs/dashboard.md).
+
+The first-version tactical command console adds an authenticated private live map
+and short-retention replay behind the same edge. Operators can dispatch owned
+units to coordinates, request Core movement, cancel commands, manage
+expeditions, adjust production weights, and inspect audit receipts. Control
+states are AUTO, MANUAL, EXPEDITION, and EMERGENCY. The browser can only queue
+fixed-schema command files; the Agent remains the sole SDK action executor and
+revalidates ownership, TTL, danger, and collision conditions every Tick, with
+deterministic emergency takeover. Tactical coordinates and identifiers never
+leave the authenticated edge. See [Tactical Command Console](docs/tactical-console.md).
 
 ## AI Is Optional
 
@@ -189,6 +200,7 @@ Before the first public commit, follow the [release checklist](docs/release-chec
 - [LINUX DO](https://linux.do/) - an open-source community this project recognizes and supports
 - [Documentation index](docs/README.md)
 - [Strategy design](docs/strategy.md)
+- [Tactical command console](docs/tactical-console.md)
 - [Threat response state machine](docs/threat-response.md)
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)
@@ -201,7 +213,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_tactical.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 

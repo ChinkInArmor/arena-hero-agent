@@ -19,6 +19,7 @@
 - 遇到活跃敌方舰队时优先拉扯避战；对确认静止且孤立的威胁或 Core 执行有限清除。
 - 定时检测游戏规则和 SDK 版本，发现不兼容时进入保守模式。
 - 大模型不直接生成每 Tick 动作。可选后台顾问每 128-512 Tick 仅返回经过严格校验且会过期的战略参数；无密钥、超时、非法输出或供应商故障时自动使用本地策略。
+- 可选认证战术指挥台：私有实时地图与 48 小时回放、单位坐标派遣、Core 移动请求、命令取消、远征队、生产权重、审计回执，以及 AUTO/MANUAL/EXPEDITION/EMERGENCY 控制状态。浏览器只能写入固定 schema 的命令队列，Agent 仍是唯一 SDK 动作执行者。
 
 ## 环境要求
 
@@ -127,12 +128,19 @@ sudo sh scripts/install-systemd.sh --with-ai /secure/path/supervisor.env
 sudo sh scripts/install-systemd.sh --with-optimizer
 ```
 
-### 只读运维控制台
+### 运维控制台与战术指挥台
 
-可选的 FastAPI/React 控制台通过仅监听回环地址的独立服务展示脱敏后的健康、
-经济、舰队、战略、模型顾问、趋势和事件数据。它不提供游戏控制、命令执行、
-凭据、原始日志或服务操作接口。公网入口采用 Cloudflare 橙云、Caddy HTTPS 和
-Basic Auth。部署与权限边界见 [运维控制台文档](docs/dashboard.md)。
+可选的 FastAPI/React 运维控制台通过仅监听回环地址的独立服务展示脱敏后的健康、
+经济、舰队、战略、模型顾问、趋势和事件数据。它不提供游戏控制、凭据、原始日志
+或服务操作接口。公网入口采用 Cloudflare 橙云、Caddy HTTPS 和 Basic Auth。
+部署与权限边界见 [运维控制台文档](docs/dashboard.md)。
+
+第一版战术指挥台在同一入口下提供经过认证的私有实时地图和短期回放。操作员可以
+向坐标派遣所属单位、请求 Core 移动、取消命令、管理远征队、调整生产权重并查看
+审计回执。控制状态包括 AUTO、MANUAL、EXPEDITION 和 EMERGENCY。浏览器只能写入
+固定 schema 的命令文件；Agent 仍是唯一 SDK 动作执行者，每 Tick 重新校验归属、
+TTL、危险与碰撞条件，并在应急状态下接管确定性控制。战术坐标与标识符不会离开
+认证边缘。详见 [战术指挥台文档](docs/tactical-console.md)。
 
 ## 模型监督是可选项
 
@@ -153,6 +161,7 @@ Basic Auth。部署与权限边界见 [运维控制台文档](docs/dashboard.md)
 - [LINUX DO](https://linux.do/) - 本项目认可并支持的开源社区
 - [文档索引](docs/README.md)
 - [策略设计](docs/strategy.md)
+- [战术指挥台](docs/tactical-console.md)
 - [参与贡献](CONTRIBUTING.md)
 - [社区行为准则](CODE_OF_CONDUCT.md)
 - [安全策略](SECURITY.md)
@@ -164,7 +173,7 @@ python -m pip install --require-hashes -r requirements-build.lock
 python -m pip install --require-hashes -r requirements.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python -m unittest discover -v
-python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
+python -m compileall -q arena_farmer.py arena_strategy.py arena_observability.py arena_dashboard.py arena_tactical.py arena_health.py arena_supervisor.py arena_optimizer.py arena_version_monitor.py
 python scripts/check_secrets.py
 ```
 
