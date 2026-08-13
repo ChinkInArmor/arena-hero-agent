@@ -10,6 +10,7 @@ import {
   Database,
   Gauge,
   HardDrive,
+  Map,
   RefreshCw,
   Shield,
   Swords,
@@ -26,6 +27,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+
+import TacticalConsole from "./TacticalConsole";
 
 interface Observation {
   generated_at: string;
@@ -225,6 +228,7 @@ function Weight({ label, value, color }: { label: string; value: number; color: 
 }
 
 function App() {
+  const [view, setView] = useState<"tactical" | "operations">("tactical");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -287,8 +291,12 @@ function App() {
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark"><Crosshair size={20} /></div>
-          <div><h1>Arena Hero</h1><span>运维控制台</span></div>
+          <div><h1>Arena Hero</h1><span>战术指挥台</span></div>
         </div>
+        <nav className="primary-tabs" aria-label="主视图">
+          <button className={view === "tactical" ? "active" : ""} onClick={() => setView("tactical")}><Map size={15}/>战术地图</button>
+          <button className={view === "operations" ? "active" : ""} onClick={() => setView("operations")}><Activity size={15}/>运维状态</button>
+        </nav>
         <div className="topbar-actions">
           <div className={`status status-${status}`}><i />{statusLabel}</div>
           <span className="tick">Tick {observation?.tick?.toLocaleString() ?? "--"}</span>
@@ -298,6 +306,7 @@ function App() {
         </div>
       </header>
 
+      {view === "tactical" ? <TacticalConsole /> : <>
       {status !== "healthy" && (
         <div className={`notice notice-${status}`}>
           <CircleAlert size={17} />
@@ -421,6 +430,7 @@ function App() {
           </section>
         </aside>
       </section>
+      </>}
     </main>
   );
 }

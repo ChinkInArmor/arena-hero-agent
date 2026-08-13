@@ -7,12 +7,14 @@ Wants=arena-hero-agent.service
 Type=simple
 User=arena-hero-dashboard
 Group=arena-hero-observe
+SupplementaryGroups=arena-hero-tactical
 WorkingDirectory=/opt/arena-hero-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=ARENA_DASHBOARD_DATABASE=/var/lib/arena-hero-dashboard/dashboard.sqlite3
 Environment=ARENA_DASHBOARD_INBOX=/var/lib/arena-hero-observability/inbox
 Environment=ARENA_DASHBOARD_RELEASE=/opt/arena-hero-agent/current
+Environment=ARENA_DASHBOARD_TACTICAL_ROOT=/var/lib/arena-hero-tactical
 Environment=ARENA_DASHBOARD_STATIC_DIR=/opt/arena-hero-agent/current/dashboard
 ExecStart=/opt/arena-hero-agent/current/.venv/bin/arena-hero-dashboard --host 127.0.0.1 --port 8765
 Restart=on-failure
@@ -32,8 +34,8 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectSystem=strict
-ReadOnlyPaths=/opt/arena-hero-agent /var/lib/arena-hero-observability
-ReadWritePaths=/var/lib/arena-hero-dashboard
+ReadOnlyPaths=/opt/arena-hero-agent /var/lib/arena-hero-observability /var/lib/arena-hero-tactical
+ReadWritePaths=/var/lib/arena-hero-dashboard /var/lib/arena-hero-tactical/commands
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true

@@ -14,6 +14,7 @@ SUPERVISOR_ENV=${ARENA_SUPERVISOR_ENV:-/etc/arena-hero-supervisor.env}
 OBSERVATION_ROOT=${ARENA_OBSERVATION_ROOT:-/var/lib/arena-hero-observability}
 OBSERVATION_INBOX=$OBSERVATION_ROOT/inbox
 DASHBOARD_STATE=${ARENA_DASHBOARD_STATE:-/var/lib/arena-hero-dashboard}
+TACTICAL_ROOT=${ARENA_TACTICAL_ROOT:-/var/lib/arena-hero-tactical}
 SYSTEMD_UNIT_DIR=${ARENA_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
 ROLLBACK_BIN=${ARENA_ROLLBACK_BIN:-/usr/local/sbin/arena-hero-rollback}
 SYSTEMCTL_BIN=${ARENA_SYSTEMCTL_BIN:-systemctl}
@@ -490,8 +491,17 @@ if ! id arena-hero-dashboard >/dev/null 2>&1; then
         --shell "$nologin_shell" --gid arena-hero-observe arena-hero-dashboard
 fi
 usermod -a -G arena-hero-observe arena-hero
+if ! getent group arena-hero-tactical >/dev/null 2>&1; then
+    groupadd --system arena-hero-tactical
+fi
+usermod -a -G arena-hero-tactical arena-hero
+usermod -a -G arena-hero-tactical arena-hero-dashboard
 install -d -o root -g arena-hero-observe -m 2770 "$OBSERVATION_INBOX"
 install -d -o arena-hero-dashboard -g arena-hero-observe -m 0750 "$DASHBOARD_STATE"
+install -d -o arena-hero -g arena-hero-tactical -m 2750 "$TACTICAL_ROOT"
+install -d -o arena-hero-dashboard -g arena-hero-tactical -m 2770 "$TACTICAL_ROOT/commands"
+install -d -o arena-hero -g arena-hero-tactical -m 2750 \
+    "$TACTICAL_ROOT/history" "$TACTICAL_ROOT/receipts"
 if [ "$WITH_SUPERVISOR" -eq 1 ]; then
     ensure_user arena-hero-supervisor
     usermod -a -G systemd-journal arena-hero-supervisor
@@ -611,6 +621,7 @@ do
         -e "s|/etc/arena-hero-supervisor.env|$SUPERVISOR_ENV|g" \
         -e "s|/var/lib/arena-hero-observability|$OBSERVATION_ROOT|g" \
         -e "s|/var/lib/arena-hero-dashboard|$DASHBOARD_STATE|g" \
+        -e "s|/var/lib/arena-hero-tactical|$TACTICAL_ROOT|g" \
         "$PROJECT_ROOT/deploy/$unit" > "$TEMP_UNIT"
     chmod 0644 "$TEMP_UNIT"
     chown root:root "$TEMP_UNIT"

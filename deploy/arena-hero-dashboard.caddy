@@ -15,7 +15,9 @@ arena.911439925.xyz {
             arena-admin {$ARENA_DASHBOARD_PASSWORD_HASH}
         }
 
-        reverse_proxy 127.0.0.1:8765
+        reverse_proxy 127.0.0.1:8765 {
+            header_up X-Arena-Authenticated "1"
+        }
     }
 
     log {

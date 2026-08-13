@@ -321,6 +321,7 @@ def select_marginal_unit(
     vanguard_cost: int,
     ranger_cost: int,
     parameters: StrategicParameters,
+    production_weights: Mapping[str, int] | None = None,
 ) -> str | None:
     candidates: list[tuple[int, int, str]] = []
     specs = (
@@ -329,21 +330,27 @@ def select_marginal_unit(
             workers,
             parameters.worker_target,
             worker_cost,
-            parameters.economy_weight + parameters.territory_weight,
+            production_weights["WORKER"]
+            if production_weights is not None
+            else parameters.economy_weight + parameters.territory_weight,
         ),
         (
             "VANGUARD",
             vanguards,
             parameters.vanguard_target,
             vanguard_cost,
-            parameters.combat_weight + parameters.safety_weight,
+            production_weights["VANGUARD"]
+            if production_weights is not None
+            else parameters.combat_weight + parameters.safety_weight,
         ),
         (
             "RANGER",
             rangers,
             parameters.ranger_target,
             ranger_cost,
-            parameters.combat_weight + parameters.territory_weight,
+            production_weights["RANGER"]
+            if production_weights is not None
+            else parameters.combat_weight + parameters.territory_weight,
         ),
     )
     for unit_type, count, target, cost, utility in specs:

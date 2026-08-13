@@ -12,6 +12,8 @@ Use the document that matches the task:
   influence scoring, marginal production, and the optional model adviser.
 - [Read-only operations Dashboard](dashboard.md): redacted observation schema,
   SQLite retention, FastAPI/React service isolation, and Caddy deployment.
+- [Tactical Command Console](tactical-console.md): authenticated private map,
+  fixed-schema commands, Agent-side validation, receipts, and emergency takeover.
 - [v0.14 economic strategy upgrade](v0.14-economic-strategy-upgrade.md):
   approved requirements and acceptance criteria for adapting the production
   policy to population-based Unit prices.

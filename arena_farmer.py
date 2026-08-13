@@ -20,6 +20,7 @@ from uuid import UUID
 
 from arena_health import write_heartbeat
 from arena_observability import AsyncObservationWriter, build_observation
+from arena_tactical import TacticalController
 from arena_strategy import (
     AdviserConfig,
     AsyncStrategicAdviser,
@@ -1524,6 +1525,7 @@ class CoreFarmer:
         self.compatibility_hold = False
         self.strategic_controller = StrategicController(strategic_adviser)
         self.strategic_parameters = BASELINE_PARAMETERS
+        self.production_weights_override: dict[str, int] | None = None
         self._strategic_context: StrategicContext | None = None
         self._last_core_position: Position | None = None
         self.known_obstacles: set[Position] = set()
@@ -4752,6 +4754,7 @@ class CoreFarmer:
                 vanguard_cost=production_budget.vanguard_cost,
                 ranger_cost=production_budget.ranger_cost,
                 parameters=self.strategic_parameters,
+                production_weights=self.production_weights_override,
             )
             strategic_unit = (
                 UnitType(strategic_unit_name)
@@ -5304,6 +5307,96 @@ def _strategic_adviser_from_environment() -> AsyncStrategicAdviser | None:
     )
 
 
+def _tactical_emergency_reason(tactic: CoreFarmer) -> str | None:
+    if tactic.compatibility_hold:
+        return "compatibility_hold"
+    if tactic.recovery_mode:
+        return "recovery"
+    if tactic.threat_assessment.level in {
+        ThreatLevel.PRE_EVADE,
+        ThreatLevel.ENGAGED,
+        ThreatLevel.BREAKOUT,
+    }:
+        return f"threat_{tactic.threat_assessment.level.value.lower()}"
+    if tactic.combat_pressure_active or tactic.last_core_survival_margin <= 0:
+        return "core_survival"
+    return None
+
+
+def _apply_tactical_orders(
+    turn: Turn,
+    tactic: CoreFarmer,
+    tactical: TacticalController,
+) -> str | None:
+    emergency = _tactical_emergency_reason(tactic)
+    if emergency:
+        tactical.emergency_override(turn.tick, emergency)
+        return emergency
+    tactical.expire(turn.tick)
+    tactical.materialize_expeditions(turn, turn.tick)
+    if not tactical.active_orders:
+        return None
+    enemies = tuple(turn.visible_enemies)
+    context = MovementContext(
+        obstacles=set(tactic.known_obstacles),
+        resource_cells=set(turn.resource_cells),
+        enemy_cells={enemy.position for enemy in enemies},
+        danger_cells=set(tactic.last_danger_cells),
+        discouraged_cells=set(),
+        friendly_counts=Counter(
+            [unit.position for unit in turn.units]
+            + ([turn.core.position] if turn.core is not None else [])
+        ),
+        reserved_destinations=set(),
+        core_position=turn.core.position if turn.core is not None else None,
+    )
+    units = {unit.id: unit for unit in turn.units}
+    for unit_id, order in tuple(tactical.active_orders.items()):
+        actor = turn.core if unit_id is None else units.get(unit_id)
+        if actor is None:
+            tactical.active_orders.pop(unit_id, None)
+            continue
+        if actor.position == order.target:
+            actor.clear_action()
+            actor.wait()
+            tactical.complete(unit_id, turn.tick)
+            continue
+        target_occupants = context.friendly_counts.get(order.target, 0)
+        if target_occupants > 0 or (unit_id is None and order.target in context.resource_cells):
+            actor.clear_action()
+            actor.wait()
+            continue
+        if unit_id is None:
+            if actor.view.state is CoreState.MOVING:
+                actor.clear_action()
+                actor.cancel_move()
+                continue
+            blocked = tactic._core_blocked_cells(turn, context)
+        else:
+            blocked = set(context.obstacles) | set(context.enemy_cells) | set(context.danger_cells)
+            blocked.update(
+                position
+                for position, count_at_position in context.friendly_counts.items()
+                if count_at_position >= 1 and position != actor.position
+            )
+        directions = _path_directions(actor.position, order.target, blocked)
+        actor.clear_action()
+        if not directions:
+            actor.wait()
+            continue
+        direction = directions[0]
+        destination = _destination(actor.position, direction)
+        if destination in context.reserved_destinations or destination in context.danger_cells:
+            actor.wait()
+            continue
+        if unit_id is None:
+            actor.start_move(direction)
+        else:
+            actor.move(direction)
+        context.reserved_destinations.add(destination)
+    return None
+
+
 def play(
     api_key: str,
     *,
@@ -5315,6 +5408,7 @@ def play(
     stale_turn_timeout_seconds: float = DEFAULT_STALE_TURN_TIMEOUT_SECONDS,
     strategic_adviser: AsyncStrategicAdviser | None = None,
     observation_writer: AsyncObservationWriter | None = None,
+    tactical_controller: TacticalController | None = None,
 ) -> None:
     if (
         not math.isfinite(stale_turn_timeout_seconds)
@@ -5351,7 +5445,22 @@ def play(
                     _emit_resource_ledger(
                         _reconcile_resource_turn(resource_ledger_snapshot, turn)
                     )
+                if tactical_controller is not None:
+                    tactical_controller.collect_commands(
+                        turn.tick,
+                        {unit.id for unit in turn.units},
+                    )
+                tactic.production_weights_override = (
+                    tactical_controller.production_weights_override
+                    if tactical_controller is not None
+                    else None
+                )
                 tactic.choose_actions(turn)
+                tactical_emergency = (
+                    _apply_tactical_orders(turn, tactic, tactical_controller)
+                    if tactical_controller is not None
+                    else None
+                )
                 try:
                     accepted = turn.submit()
                 except APIError as exc:
@@ -5386,6 +5495,20 @@ def play(
                         )
                     except Exception:
                         pass
+                if tactical_controller is not None:
+                    try:
+                        tactical_controller.write_snapshot(
+                            turn,
+                            emergency_reason=tactical_emergency,
+                            unit_modes=tactic.worker_modes,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"WARNING tick={accepted.tick} tactical_snapshot_failed "
+                            f"error={type(exc).__name__}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 if _should_log_turn(turn):
                     actions, events = _turn_diagnostics(turn)
                     print(
@@ -5455,6 +5578,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Write asynchronous redacted Dashboard observations to this directory.",
     )
+    parser.add_argument(
+        "--tactical-root",
+        type=Path,
+        help="Read validated tactical commands and write private tactical state.",
+    )
     return parser
 
 
@@ -5466,10 +5594,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     strategic_adviser: AsyncStrategicAdviser | None = None
     observation_writer: AsyncObservationWriter | None = None
+    tactical_controller: TacticalController | None = None
     try:
         strategic_adviser = _strategic_adviser_from_environment()
         if args.observation_dir is not None:
             observation_writer = AsyncObservationWriter(args.observation_dir)
+        if args.tactical_root is not None:
+            tactical_controller = TacticalController(args.tactical_root)
         api_key = load_api_key(env_file=args.env_file)
         play(
             api_key,
@@ -5481,6 +5612,7 @@ def main(argv: list[str] | None = None) -> int:
             stale_turn_timeout_seconds=args.stale_turn_timeout_seconds,
             strategic_adviser=strategic_adviser,
             observation_writer=observation_writer,
+            tactical_controller=tactical_controller,
         )
 
     except KeyboardInterrupt:

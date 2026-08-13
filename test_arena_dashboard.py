@@ -10,6 +10,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from arena_dashboard import DashboardStore, _downsample, create_app, deployment_metadata
+from arena_tactical import TacticalController
+from test_arena_farmer import WORKER_1, make_turn, unit
 
 
 def sample_observation() -> dict[str, object]:
@@ -97,6 +99,98 @@ class ArenaDashboardTests(unittest.TestCase):
         self.assertEqual(len(sampled), 720)
         self.assertEqual(sampled[0]["tick"], 0)
         self.assertEqual(sampled[-1]["tick"], 1_999)
+
+    def test_tactical_api_requires_proxy_auth_and_csrf(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            (inbox / "snapshot.json").write_text(
+                json.dumps(sample_observation()), encoding="utf-8"
+            )
+            tactical = TacticalController(root / "tactical")
+            tactical.write_snapshot(
+                make_turn(
+                    tick=120,
+                    units=[unit(WORKER_1, "WORKER", (2, 3), cargo=0)],
+                ),
+                emergency_reason=None,
+                unit_modes={},
+            )
+            app = create_app(
+                database_path=root / "dashboard.sqlite3",
+                inbox_path=inbox,
+                release_path=root,
+                static_path=root / "missing-static",
+                tactical_path=root / "tactical",
+                collect_interval_seconds=60,
+            )
+            with TestClient(app, base_url="https://testserver") as client:
+                self.assertEqual(client.get("/api/v1/tactical/state").status_code, 403)
+                headers = {"X-Arena-Authenticated": "1"}
+                state = client.get("/api/v1/tactical/state", headers=headers)
+                self.assertEqual(state.status_code, 200)
+                self.assertEqual(state.json()["units"][0]["id"], WORKER_1)
+
+                without_csrf = client.post(
+                    "/api/v1/tactical/commands",
+                    headers=headers,
+                    json={
+                        "kind": "MOVE_UNITS",
+                        "unit_ids": [WORKER_1],
+                        "target_x": 8,
+                        "target_y": 3,
+                    },
+                )
+                self.assertEqual(without_csrf.status_code, 403)
+                token = client.get("/api/v1/tactical/csrf", headers=headers).json()["csrf_token"]
+                queued = client.post(
+                    "/api/v1/tactical/commands",
+                    headers={**headers, "X-Arena-CSRF": token},
+                    json={
+                        "kind": "MOVE_UNITS",
+                        "unit_ids": [WORKER_1],
+                        "target_x": 8,
+                        "target_y": 3,
+                        "ttl_ticks": 32,
+                    },
+                )
+                self.assertEqual(queued.status_code, 202)
+                self.assertEqual(queued.json()["issued_tick"], 120)
+                command_files = list((root / "tactical" / "commands").glob("command-*.json"))
+                self.assertEqual(len(command_files), 1)
+                payload = json.loads(command_files[0].read_text(encoding="utf-8"))
+                self.assertNotIn("action", payload)
+                self.assertEqual(payload["target_x"], 8)
+
+    def test_tactical_write_rejects_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            (inbox / "snapshot.json").write_text(json.dumps(sample_observation()), encoding="utf-8")
+            tactical = TacticalController(root / "tactical")
+            tactical.write_snapshot(make_turn(tick=120), emergency_reason=None, unit_modes={})
+            value = json.loads(tactical.snapshot_path.read_text(encoding="utf-8"))
+            value["generated_at"] = (datetime.now(UTC) - __import__("datetime").timedelta(minutes=2)).isoformat()
+            tactical.snapshot_path.write_text(json.dumps(value), encoding="utf-8")
+            app = create_app(
+                database_path=root / "dashboard.sqlite3",
+                inbox_path=inbox,
+                static_path=root / "missing-static",
+                tactical_path=root / "tactical",
+                collect_interval_seconds=60,
+            )
+            with TestClient(app, base_url="https://testserver") as client:
+                headers = {"X-Arena-Authenticated": "1"}
+                token = client.get("/api/v1/tactical/csrf", headers=headers).json()["csrf_token"]
+                response = client.post(
+                    "/api/v1/tactical/commands",
+                    headers={**headers, "X-Arena-CSRF": token},
+                    json={"kind": "MOVE_CORE", "target_x": 2, "target_y": 2},
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["detail"], "tactical_state_stale")
 
     def test_store_collects_valid_snapshot_and_redacted_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

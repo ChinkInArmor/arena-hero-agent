@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 from contextlib import asynccontextmanager, contextmanager
@@ -11,10 +12,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from arena_tactical import (
+    DEFAULT_COMMAND_TTL_TICKS,
+    DEFAULT_TACTICAL_ROOT,
+    TacticalCommand,
+    TacticalReceipt,
+    TacticalSnapshot,
+    enqueue_command,
+)
 
 DEFAULT_DATABASE_PATH = Path("/var/lib/arena-hero-dashboard/dashboard.sqlite3")
 DEFAULT_INBOX_PATH = Path("/var/lib/arena-hero-observability/inbox")
@@ -25,6 +35,9 @@ HOURLY_RETENTION_DAYS = 90
 STALE_AFTER_SECONDS = 45
 RANGE_HOURS = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720, "90d": 2160}
 MAX_HISTORY_POINTS = 720
+DEFAULT_TACTICAL_PATH = DEFAULT_TACTICAL_ROOT
+TACTICAL_AUTH_HEADER = "x-arena-authenticated"
+CSRF_COOKIE = "arena_csrf"
 
 
 class StrictModel(BaseModel):
@@ -141,6 +154,29 @@ class Observation(StrictModel):
     event_counts: dict[str, int]
     worker_modes: dict[str, int]
     events: list[RedactedEvent]
+
+
+class TacticalCommandRequest(StrictModel):
+    kind: Literal[
+        "MOVE_UNITS",
+        "MOVE_CORE",
+        "CANCEL",
+        "SET_EXPEDITION",
+        "DELETE_EXPEDITION",
+        "SET_PRODUCTION_WEIGHTS",
+    ]
+    ttl_ticks: int = Field(default=DEFAULT_COMMAND_TTL_TICKS, ge=1, le=64)
+    unit_ids: list[str] = Field(default_factory=list, max_length=64)
+    target_x: int | None = None
+    target_y: int | None = None
+    expedition_id: str | None = Field(default=None, max_length=40)
+    cancel_command_id: str | None = Field(default=None, max_length=36)
+    name: str | None = Field(default=None, max_length=40)
+    vanguard_count: int | None = Field(default=None, ge=0, le=32)
+    ranger_count: int | None = Field(default=None, ge=0, le=32)
+    worker_weight: int | None = Field(default=None, ge=0, le=10)
+    vanguard_weight: int | None = Field(default=None, ge=0, le=10)
+    ranger_weight: int | None = Field(default=None, ge=0, le=10)
 
 
 class OverviewResponse(BaseModel):
@@ -458,12 +494,16 @@ def create_app(
     inbox_path: Path | None = None,
     release_path: Path | None = None,
     static_path: Path | None = None,
+    tactical_path: Path | None = None,
     collect_interval_seconds: float = 5.0,
 ) -> FastAPI:
     database = database_path or Path(os.environ.get("ARENA_DASHBOARD_DATABASE", DEFAULT_DATABASE_PATH))
     inbox = inbox_path or Path(os.environ.get("ARENA_DASHBOARD_INBOX", DEFAULT_INBOX_PATH))
     release = release_path or Path(os.environ.get("ARENA_DASHBOARD_RELEASE", DEFAULT_RELEASE_PATH))
     static = static_path or Path(os.environ.get("ARENA_DASHBOARD_STATIC_DIR", DEFAULT_STATIC_PATH))
+    tactical = tactical_path or Path(
+        os.environ.get("ARENA_DASHBOARD_TACTICAL_ROOT", DEFAULT_TACTICAL_PATH)
+    )
     store = DashboardStore(database, inbox)
 
     @asynccontextmanager
@@ -493,6 +533,33 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.store = store
+    app.state.csrf_tokens = set()
+
+    def require_tactical_auth(request: Request) -> None:
+        if request.headers.get(TACTICAL_AUTH_HEADER) != "1":
+            raise HTTPException(status_code=403, detail="tactical_auth_required")
+
+    def require_csrf(request: Request, token: str | None) -> None:
+        cookie = request.cookies.get(CSRF_COOKIE)
+        if (
+            token is None
+            or cookie is None
+            or token != cookie
+            or token not in app.state.csrf_tokens
+        ):
+            raise HTTPException(status_code=403, detail="csrf_validation_failed")
+
+    def current_tactical_tick() -> int:
+        try:
+            value = TacticalSnapshot.model_validate_json(
+                (tactical / "snapshot.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValidationError) as exc:
+            raise HTTPException(status_code=503, detail="tactical_state_unavailable") from exc
+        age = (datetime.now(UTC) - value.generated_at).total_seconds()
+        if age > STALE_AFTER_SECONDS:
+            raise HTTPException(status_code=409, detail="tactical_state_stale")
+        return value.tick
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -549,6 +616,130 @@ def create_app(
             raise HTTPException(status_code=400, detail="unsupported_category")
         items = await asyncio.to_thread(store.events, limit, category)
         return {"items": items}
+
+    @app.get("/api/v1/tactical/csrf")
+    async def tactical_csrf(request: Request, response: Response) -> dict[str, str]:
+        require_tactical_auth(request)
+        token = secrets.token_urlsafe(32)
+        app.state.csrf_tokens.add(token)
+        if len(app.state.csrf_tokens) > 128:
+            app.state.csrf_tokens = {token}
+        response.set_cookie(
+            CSRF_COOKIE,
+            token,
+            secure=True,
+            httponly=False,
+            samesite="strict",
+            max_age=3600,
+            path="/api/v1/tactical",
+        )
+        return {"csrf_token": token}
+
+    @app.get("/api/v1/tactical/state")
+    async def tactical_state(request: Request) -> dict[str, Any]:
+        require_tactical_auth(request)
+        try:
+            snapshot = TacticalSnapshot.model_validate_json(
+                (tactical / "snapshot.json").read_text(encoding="utf-8")
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="tactical_state_unavailable") from exc
+        except ValidationError as exc:
+            raise HTTPException(status_code=503, detail="tactical_state_invalid") from exc
+        return snapshot.model_dump(mode="json")
+
+    @app.get("/api/v1/tactical/history")
+    async def tactical_history(
+        request: Request,
+        before_tick: int | None = Query(default=None, ge=0),
+        limit: int = Query(default=120, ge=1, le=500),
+    ) -> dict[str, Any]:
+        require_tactical_auth(request)
+        paths = sorted((tactical / "history").glob("tick-*.json"), reverse=True)
+        items = []
+        for path in paths:
+            try:
+                snapshot = TacticalSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValidationError):
+                continue
+            if before_tick is not None and snapshot.tick >= before_tick:
+                continue
+            items.append(snapshot.model_dump(mode="json"))
+            if len(items) >= limit:
+                break
+        return {"items": items, "retention_hours": 48}
+
+    @app.get("/api/v1/tactical/receipts")
+    async def tactical_receipts(
+        request: Request,
+        limit: int = Query(default=80, ge=1, le=200),
+    ) -> dict[str, Any]:
+        require_tactical_auth(request)
+        items = []
+        for path in sorted((tactical / "receipts").glob("receipt-*.json"), reverse=True):
+            try:
+                receipt = TacticalReceipt.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValidationError):
+                continue
+            items.append(receipt.model_dump(mode="json"))
+            if len(items) >= limit:
+                break
+        return {"items": items}
+
+    @app.post("/api/v1/tactical/commands", status_code=202)
+    async def tactical_command(
+        payload: TacticalCommandRequest,
+        request: Request,
+        x_arena_csrf: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_tactical_auth(request)
+        require_csrf(request, x_arena_csrf)
+        command_id = str(__import__("uuid").uuid4())
+        try:
+            command = TacticalCommand(
+                command_id=command_id,
+                kind=payload.kind,
+                issued_at=datetime.now(UTC),
+                issued_tick=current_tactical_tick(),
+                ttl_ticks=payload.ttl_ticks,
+                unit_ids=payload.unit_ids,
+                target_x=payload.target_x,
+                target_y=payload.target_y,
+                expedition_id=payload.expedition_id,
+                cancel_command_id=payload.cancel_command_id,
+                name=payload.name,
+                vanguard_count=payload.vanguard_count,
+                ranger_count=payload.ranger_count,
+                worker_weight=payload.worker_weight,
+                vanguard_weight=payload.vanguard_weight,
+                ranger_weight=payload.ranger_weight,
+            )
+            enqueue_command(tactical / "commands", command)
+        except (ValidationError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid_tactical_command") from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail="duplicate_tactical_command") from exc
+        return {
+            "command_id": command.command_id,
+            "status": "QUEUED",
+            "issued_tick": command.issued_tick,
+            "expires_tick": command.expires_tick,
+        }
+
+    @app.delete("/api/v1/tactical/commands/{command_id}", status_code=202)
+    async def cancel_tactical_command(
+        command_id: str,
+        request: Request,
+        x_arena_csrf: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_tactical_auth(request)
+        require_csrf(request, x_arena_csrf)
+        payload = TacticalCommandRequest(
+            kind="CANCEL",
+            cancel_command_id=command_id,
+            ttl_ticks=DEFAULT_COMMAND_TTL_TICKS,
+        )
+        return await tactical_command(payload, request, x_arena_csrf)
 
     if static.is_dir():
         app.mount("/", StaticFiles(directory=static, html=True), name="dashboard")

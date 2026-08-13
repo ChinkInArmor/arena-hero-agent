@@ -135,6 +135,7 @@ class SystemdDeploymentTests(unittest.TestCase):
         self.runtime_dir = runtime_dir
         self.observation_root = self.root / "var" / "lib" / "arena-hero-observability"
         self.dashboard_state = self.root / "var" / "lib" / "arena-hero-dashboard"
+        self.tactical_root = self.root / "var" / "lib" / "arena-hero-tactical"
         self.rollback_bin = rollback_bin
         self.env = os.environ.copy()
         self.env.update(
@@ -147,6 +148,7 @@ class SystemdDeploymentTests(unittest.TestCase):
                 "ARENA_SUPERVISOR_ENV": str(etc_root / "arena-hero-supervisor.env"),
                 "ARENA_OBSERVATION_ROOT": str(self.observation_root),
                 "ARENA_DASHBOARD_STATE": str(self.dashboard_state),
+                "ARENA_TACTICAL_ROOT": str(self.tactical_root),
                 "ARENA_SYSTEMD_UNIT_DIR": str(unit_dir),
                 "ARENA_ROLLBACK_BIN": str(rollback_bin),
                 "ARENA_SYSTEMCTL_BIN": "systemctl",
@@ -482,10 +484,14 @@ os.execv("/usr/bin/install", ["install", *args])
         self.assertIn("--stale-turn-timeout-seconds 90", agent_unit)
         self.assertIn("LimitCORE=0", agent_unit)
         self.assertIn("SupplementaryGroups=arena-hero-observe", agent_unit)
+        self.assertIn("SupplementaryGroups=arena-hero-observe arena-hero-tactical", agent_unit)
         self.assertIn(f"--observation-dir {self.observation_root}/inbox", agent_unit)
+        self.assertIn("--tactical-root ${ARENA_TACTICAL_ROOT}", agent_unit)
+        self.assertIn(f"Environment=ARENA_TACTICAL_ROOT={self.tactical_root}", agent_unit)
         dashboard_unit = (self.unit_dir / "arena-hero-dashboard.service").read_text(encoding="utf-8")
         self.assertIn(f"ARENA_DASHBOARD_DATABASE={self.dashboard_state}/dashboard.sqlite3", dashboard_unit)
         self.assertIn(f"ARENA_DASHBOARD_INBOX={self.observation_root}/inbox", dashboard_unit)
+        self.assertIn(f"ARENA_DASHBOARD_TACTICAL_ROOT={self.tactical_root}", dashboard_unit)
         self.assertIn("--host 127.0.0.1 --port 8765", dashboard_unit)
         self.assertTrue((self._resolved("current") / "dashboard" / "index.html").is_file())
         self.assertNotIn("WorkingDirectory=/opt/arena-hero-agent", agent_unit)
