@@ -47,6 +47,7 @@ py-modules = [
     "arena_observability",
     "arena_strategy",
     "arena_dashboard",
+    "arena_tactical",
     "arena_optimizer",
     "arena_supervisor",
     "arena_version_monitor",
