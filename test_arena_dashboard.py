@@ -14,7 +14,7 @@ from arena_dashboard import DashboardStore, _downsample, create_app, deployment_
 
 def sample_observation() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "tick": 120,
         "agent": {"core_alive": True, "compatibility_hold": False, "recovery": False},
@@ -37,6 +37,8 @@ def sample_observation() -> dict[str, object]:
             "core_survival_margin": 10,
             "scout_chunks": 12,
             "dedicated_scouts": 3,
+            "beacon_runner_active": False,
+            "combat_patrol_units": 2,
         },
         "strategy": {
             "phase": "EXPANSION",
@@ -54,6 +56,15 @@ def sample_observation() -> dict[str, object]:
             "safety_weight": 7,
             "beacon_priority": 1,
             "scout_percent": 30,
+            "force_stage": "MOBILIZE",
+            "force_stage_index": 1,
+            "force_target_population": 26,
+            "force_target_workers": 12,
+            "force_target_vanguards": 6,
+            "force_target_rangers": 8,
+            "force_worker_deficit": 0,
+            "force_vanguard_deficit": 3,
+            "force_ranger_deficit": 4,
         },
         "adviser": {
             "enabled": False,

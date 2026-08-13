@@ -26,6 +26,7 @@ from arena_strategy import (
     BASELINE_PARAMETERS,
     StrategicContext,
     StrategicController,
+    StrategicPosture,
     resource_assignment_cost,
     scout_candidate_score,
     select_marginal_unit,
@@ -125,6 +126,12 @@ CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
 CORE_MOVE_COMMIT_PROGRESS = 2
 UNIT_EVADE_TRIGGER_DISTANCE = 5
+BEACON_RUNNER_MIN_POPULATION = 26
+BEACON_RUNNER_MIN_RESOURCES = 30
+BEACON_RETURN_RADIUS = 3
+COMBAT_PATROL_MIN_POPULATION = 26
+COMBAT_PATROL_BASE_RADIUS = 24
+COMBAT_PATROL_STAGE_STEP = 8
 RETREAT_MIN_BEACON_DISTANCE = 224
 RETREAT_SERVICE_TICKS = 8
 SIGNED_INT64_MIN = -(2**63)
@@ -1566,6 +1573,8 @@ class CoreFarmer:
         self.core_observer_target_id: UUID | None = None
         self.core_raid_spotter_id: UUID | None = None
         self.stationary_unit_target_id: UUID | None = None
+        self.beacon_runner_id: UUID | None = None
+        self.combat_patrol_ids: set[UUID] = set()
         self.threat_caution_until_tick = 0
         self.startup_tick: int | None = None
         self.economic_deposit_history: deque[tuple[int, int]] = deque(
@@ -3273,6 +3282,8 @@ class CoreFarmer:
         turn.clear()
         self._refresh_economic_history(turn)
         if turn.core is None:
+            self.beacon_runner_id = None
+            self.combat_patrol_ids.clear()
             self._refresh_threat_assessment(turn)
             return
 
@@ -3309,6 +3320,7 @@ class CoreFarmer:
                 stationary_candidates,
             )
         combat_target = isolated_core_target or stationary_unit_target
+        self._select_beacon_runner(turn, combat_target)
         observer_position = self._core_observer_position(
             turn,
             isolated_core_target,
@@ -3615,6 +3627,7 @@ class CoreFarmer:
             if self.worker_modes.get(worker_id) not in {"SCOUT", "SCOUT_BLOCKED"}:
                 self.scout_progress.pop(worker_id, None)
 
+        self.combat_patrol_ids.clear()
         self._control_vanguards(
             turn,
             mobile_enemies,
@@ -3813,6 +3826,66 @@ class CoreFarmer:
             self._set_worker_mode(worker, "SCOUT_RETURN_BLOCKED", core.position)
         return True
 
+    def _select_beacon_runner(self, turn: Turn, combat_target: object | None) -> None:
+        core = turn.core
+        candidates = sorted(turn.vanguards, key=_uuid_sort_key)[VANGUARD_CORE_GUARDS:]
+        candidate_ids = {unit.id for unit in candidates}
+        ready = bool(
+            self.strategic_parameters.posture is StrategicPosture.CONTEST
+            and self.strategic_parameters.beacon_priority >= 7
+            and combat_target is None
+            and core is not None
+            and core.view.state is CoreState.NORMAL
+            and core.hp >= 5
+            and core.shield >= 5
+            and len(turn.units) >= BEACON_RUNNER_MIN_POPULATION
+            and turn.resources >= BEACON_RUNNER_MIN_RESOURCES
+            and not self.compatibility_hold
+            and not self.recovery_mode
+            and not self.combat_pressure_active
+            and candidates
+            and (
+                turn.beacon.status is BeaconStatus.GROUND
+                or turn.beacon.carrier_id in candidate_ids
+            )
+        )
+        if not ready:
+            self.beacon_runner_id = None
+            return
+        if self.beacon_runner_id in candidate_ids:
+            return
+        self.beacon_runner_id = min(
+            candidates,
+            key=lambda unit: (
+                _distance(unit.position, turn.beacon.position),
+                _uuid_sort_key(unit),
+            ),
+        ).id
+
+    def _combat_patrol_target(self, turn: Turn, unit: object, index: int) -> Position:
+        core = turn.core
+        if core is None:
+            return unit.position
+        stage = min(3, max(0, (len(turn.units) - COMBAT_PATROL_MIN_POPULATION) // 8))
+        radius = COMBAT_PATROL_BASE_RADIUS + stage * COMBAT_PATROL_STAGE_STEP
+        vector = SCOUT_VECTORS[(unit.id.int + index) % len(SCOUT_VECTORS)]
+        return (
+            core.position[0] + vector[0] * radius,
+            core.position[1] + vector[1] * radius,
+        )
+
+    def _combat_patrol_enabled(self, turn: Turn) -> bool:
+        return bool(
+            len(turn.units) >= COMBAT_PATROL_MIN_POPULATION
+            and not self.compatibility_hold
+            and not self.recovery_mode
+            and not self.combat_pressure_active
+            and (
+                self.strategic_parameters.territory_weight >= 6
+                or self.strategic_parameters.combat_weight >= 6
+            )
+        )
+
     def _control_vanguards(
         self,
         turn: Turn,
@@ -3964,6 +4037,36 @@ class CoreFarmer:
                     continue
 
             if nearby_enemies:
+                vanguard.wait()
+                continue
+
+            if vanguard.id == self.beacon_runner_id:
+                if getattr(turn.beacon, "carrier_id", None) == vanguard.id:
+                    if (
+                        _distance(vanguard.position, core.position) > BEACON_RETURN_RADIUS
+                        and _queue_toward(vanguard, core.position, context)
+                    ):
+                        continue
+                    vanguard.wait()
+                    continue
+                if (
+                    vanguard.position == turn.beacon.position
+                    and turn.beacon.status is BeaconStatus.GROUND
+                ):
+                    vanguard.pickup_beacon()
+                    continue
+                if _queue_toward(vanguard, turn.beacon.position, context):
+                    continue
+                vanguard.wait()
+                continue
+
+            if index >= VANGUARD_CORE_GUARDS and self._combat_patrol_enabled(turn):
+                patrol_target = self._combat_patrol_target(turn, vanguard, index)
+                self.combat_patrol_ids.add(vanguard.id)
+                if patrol_target != vanguard.position and _queue_toward(
+                    vanguard, patrol_target, context
+                ):
+                    continue
                 vanguard.wait()
                 continue
 
@@ -4154,6 +4257,16 @@ class CoreFarmer:
                 continue
 
             if nearby_enemies:
+                ranger.wait()
+                continue
+
+            if index >= RANGER_CORE_GUARDS and self._combat_patrol_enabled(turn):
+                patrol_target = self._combat_patrol_target(turn, ranger, index)
+                self.combat_patrol_ids.add(ranger.id)
+                if patrol_target != ranger.position and _queue_toward(
+                    ranger, patrol_target, context
+                ):
+                    continue
                 ranger.wait()
                 continue
 

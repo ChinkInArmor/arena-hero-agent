@@ -18,6 +18,7 @@ from arena_strategy import (
     StrategicController,
     StrategicPosture,
     StrategyValidationError,
+    force_stage,
     plan_local_strategy,
     resource_assignment_cost,
     select_marginal_unit,
@@ -92,6 +93,32 @@ class StrategicValidationTests(unittest.TestCase):
                 current_tick=1,
             )
 
+    def test_overwhelm_force_is_valid_but_population_49_is_rejected(self) -> None:
+        result = validate_strategic_parameters(
+            candidate(
+                worker_target=18,
+                vanguard_target=14,
+                ranger_target=16,
+                population_limit=48,
+            ),
+            current_tick=1,
+        )
+        self.assertEqual(result.population_limit, 48)
+        with self.assertRaisesRegex(StrategyValidationError, "population_limit"):
+            validate_strategic_parameters(
+                candidate(population_limit=49),
+                current_tick=1,
+            )
+
+    def test_force_stage_reports_the_next_composition_deficits(self) -> None:
+        self.assertEqual(force_stage(24, 17, 3, 4)["name"], "MOBILIZE")
+        control = force_stage(26, 12, 6, 8)
+        self.assertEqual(control["name"], "CONTROL")
+        self.assertEqual(control["worker_deficit"], 6)
+        self.assertEqual(control["vanguard_deficit"], 4)
+        self.assertEqual(control["ranger_deficit"], 4)
+        self.assertEqual(force_stage(48, 18, 14, 16)["name"], "OVERWHELM")
+
     def test_adviser_configuration_enforces_cadence_and_provider(self) -> None:
         with self.assertRaises(ValueError):
             AdviserConfig("openai-compatible", "http://localhost:11434", "m", interval_ticks=64)
@@ -116,6 +143,17 @@ class StrategicValidationTests(unittest.TestCase):
 
 
 class LocalPlannerTests(unittest.TestCase):
+    def test_enemy_core_pressure_mobilizes_a_control_force(self) -> None:
+        result = plan_local_strategy(
+            context(visible_enemy_cores=1, vanguards=4, rangers=5)
+        )
+        self.assertEqual(result.posture, StrategicPosture.PRESSURE)
+        self.assertEqual(result.population_limit, 40)
+        self.assertEqual(
+            (result.worker_target, result.vanguard_target, result.ranger_target),
+            (18, 10, 12),
+        )
+
     def test_no_evidence_preserves_legacy_bounded_profile(self) -> None:
         result = plan_local_strategy(context())
         self.assertEqual(result.population_limit, 24)

@@ -11,8 +11,10 @@ selected events to daily JSONL files. Disk latency, a full queue, malformed outp
 or a stopped Dashboard cannot reject a Turn or stop the Agent.
 
 The observation contract includes aggregate economy, population, fleet, Core,
-worker-mode, battlefield, strategy, and adviser telemetry. Event values use an
-explicit numeric whitelist. The producer does not serialize player names, Unit
+worker-mode, battlefield, strategy, force-stage, Beacon-runner, perimeter-patrol,
+and adviser telemetry. The force view reports only stage targets and aggregate
+deficits; it contains no Unit identity or route. Event values use an explicit
+numeric whitelist. The producer does not serialize player names, Unit
 IDs, authorization headers, model prompts, model responses, or raw logs.
 
 `arena-hero-dashboard` validates the producer files with Pydantic before writing

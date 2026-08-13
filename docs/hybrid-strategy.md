@@ -29,9 +29,11 @@ out-of-range fields is rejected as a whole.
 
 No model is required. The local planner starts with the validated 24-population
 profile and opens bounded growth only when it observes evidence such as saturated
-storage or a productive, low-congestion deposit window. It can select combat
-growth when an enemy Core is visible and Beacon contesting only when the explicit
-Beacon policy is `pursue`.
+storage or a productive, low-congestion deposit window. It can mobilize a
+40-population control force when an enemy Core is visible. Validated model advice
+may select an overwhelm force up to 48 population, bounded to 18 Workers, 14
+Vanguards, and 16 Rangers. Beacon contesting remains gated by strategic evidence
+and deterministic safety checks.
 
 Resource assignment remains a deterministic minimum-cost matching problem.
 Path cost is dominant; resource density, return safety, territorial reach,
@@ -43,7 +45,9 @@ Optional production compares each target deficit and its strategic utility with
 the current official `unit_cost()`. It therefore chooses the highest marginal
 Worker, Vanguard, or Ranger purchase rather than following a fixed late-game
 unit sequence. Recovery, threat pressure, cargo constraints, cooldowns, dynamic
-prices, and resource reserves still gate every spawn.
+prices, and resource reserves still gate every spawn. Surplus military patrols
+and the optional Vanguard Beacon runner remain subordinate to deterministic Core
+defense, local combat, healing, evasion, and compatibility hold.
 
 ## Optional Model Adviser
 

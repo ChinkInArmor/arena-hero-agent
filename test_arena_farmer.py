@@ -22,6 +22,8 @@ from arena_hero import (
     unit_cost,
 )
 
+from arena_strategy import StrategicParameters, StrategicPosture
+
 from arena_farmer import (
     CoreFarmer,
     GlobalPosture,
@@ -4631,6 +4633,97 @@ class EventLoopTests(unittest.TestCase):
         self.assertTrue(_is_turn_scoped_api_error("TICK_MISMATCH"))
         self.assertTrue(_is_turn_scoped_api_error("COMMAND_WINDOW_CLOSED"))
         self.assertFalse(_is_turn_scoped_api_error("INVALID_COMMAND"))
+
+
+class TerritorialCampaignTests(unittest.TestCase):
+    @staticmethod
+    def _campaign_units() -> list[dict[str, object]]:
+        workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (40 + index, 40),
+                cargo=0,
+            )
+            for index in range(22)
+        ]
+        return workers + [
+            unit(VANGUARD_1, "VANGUARD", (0, 1)),
+            unit(VANGUARD_2, "VANGUARD", (4, 0)),
+            unit(RANGER_1, "RANGER", (0, -1)),
+            unit(RANGER_2, "RANGER", (-4, 0)),
+        ]
+
+    @staticmethod
+    def _parameters(posture: StrategicPosture, *, beacon_priority: int) -> StrategicParameters:
+        return StrategicParameters(
+            posture=posture,
+            worker_target=18,
+            vanguard_target=6,
+            ranger_target=8,
+            population_limit=32,
+            economy_weight=5,
+            territory_weight=8,
+            combat_weight=7,
+            safety_weight=6,
+            beacon_priority=beacon_priority,
+            scout_percent=20,
+            valid_until_tick=1000,
+            source="model:test",
+        )
+
+    def test_contest_uses_only_surplus_vanguard_as_beacon_runner(self) -> None:
+        tactic = CoreFarmer(beacon_policy="retreat")
+        parameters = self._parameters(StrategicPosture.CONTEST, beacon_priority=10)
+        tactic.strategic_controller.update = lambda _context: parameters
+        turn = make_turn(
+            tick=500,
+            resources=80,
+            beacon_position=(4, 0),
+            beacon_status="GROUND",
+            units=self._campaign_units(),
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+
+        self.assertEqual(tactic.beacon_runner_id, UUID(VANGUARD_2))
+        self.assertEqual(queued[VANGUARD_2]["type"], "PICKUP_BEACON")
+        self.assertNotEqual(queued[VANGUARD_1]["type"], "PICKUP_BEACON")
+
+    def test_combat_pressure_disables_beacon_runner(self) -> None:
+        tactic = CoreFarmer(beacon_policy="retreat")
+        parameters = self._parameters(StrategicPosture.CONTEST, beacon_priority=10)
+        tactic.strategic_controller.update = lambda _context: parameters
+        turn = make_turn(
+            tick=500,
+            resources=80,
+            beacon_position=(4, 0),
+            beacon_status="GROUND",
+            units=self._campaign_units(),
+            enemies=[unit(ENEMY_1, "RANGER", (3, 0), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        self.assertIsNone(tactic.beacon_runner_id)
+
+    def test_surplus_military_patrols_while_core_guards_remain_local(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        parameters = self._parameters(StrategicPosture.EXPAND, beacon_priority=0)
+        tactic.strategic_controller.update = lambda _context: parameters
+        turn = make_turn(
+            tick=500,
+            resources=80,
+            beacon_position=(200, 200),
+            units=self._campaign_units(),
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
+
+        self.assertIn(UUID(VANGUARD_2), tactic.combat_patrol_ids)
+        self.assertIn(UUID(RANGER_2), tactic.combat_patrol_ids)
+        self.assertNotIn(UUID(VANGUARD_1), tactic.combat_patrol_ids)
+        self.assertNotIn(UUID(RANGER_1), tactic.combat_patrol_ids)
+        self.assertIn(queued[VANGUARD_2]["type"], {"MOVE", "START_MOVE"})
+        self.assertIn(queued[RANGER_2]["type"], {"MOVE", "START_MOVE"})
 
 
 if __name__ == "__main__":

@@ -12,7 +12,9 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import Any
 
-OBSERVATION_SCHEMA_VERSION = 1
+from arena_strategy import force_stage
+
+OBSERVATION_SCHEMA_VERSION = 2
 DEFAULT_OBSERVATION_DIR = Path("/var/lib/arena-hero-observability/inbox")
 EVENT_RETENTION_DAYS = 8
 SAFE_EVENT_VALUES = {
@@ -125,6 +127,12 @@ def build_observation(turn: object, tactic: object, accepted_tick: int) -> dict[
         if (safe := _safe_event(event, tick=accepted_tick, index=index)) is not None
     ]
     generated_at = _timestamp()
+    formation = force_stage(
+        turn.state.population,
+        len(turn.workers),
+        len(turn.vanguards),
+        len(turn.rangers),
+    )
     return {
         "schema_version": OBSERVATION_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -163,6 +171,8 @@ def build_observation(turn: object, tactic: object, accepted_tick: int) -> dict[
             "core_survival_margin": tactic.last_core_survival_margin,
             "scout_chunks": len(tactic.scout_chunk_last_seen),
             "dedicated_scouts": len(tactic.dedicated_scout_ids),
+            "beacon_runner_active": tactic.beacon_runner_id is not None,
+            "combat_patrol_units": len(tactic.combat_patrol_ids),
         },
         "strategy": {
             "phase": tactic.strategy_phase(turn),
@@ -180,6 +190,15 @@ def build_observation(turn: object, tactic: object, accepted_tick: int) -> dict[
             "safety_weight": parameters.safety_weight,
             "beacon_priority": parameters.beacon_priority,
             "scout_percent": parameters.scout_percent,
+            "force_stage": formation["name"],
+            "force_stage_index": formation["index"],
+            "force_target_population": formation["target_population"],
+            "force_target_workers": formation["target_workers"],
+            "force_target_vanguards": formation["target_vanguards"],
+            "force_target_rangers": formation["target_rangers"],
+            "force_worker_deficit": formation["worker_deficit"],
+            "force_vanguard_deficit": formation["vanguard_deficit"],
+            "force_ranger_deficit": formation["ranger_deficit"],
         },
         "adviser": adviser_status,
         "actions": _safe_count_map(action_counts),

@@ -69,6 +69,8 @@ class BattlefieldState(StrictModel):
     core_survival_margin: int
     scout_chunks: int = Field(ge=0)
     dedicated_scouts: int = Field(ge=0)
+    beacon_runner_active: bool
+    combat_patrol_units: int = Field(ge=0)
 
 
 class StrategyState(StrictModel):
@@ -87,6 +89,15 @@ class StrategyState(StrictModel):
     safety_weight: int = Field(ge=0, le=10)
     beacon_priority: int = Field(ge=0, le=10)
     scout_percent: int = Field(ge=0, le=100)
+    force_stage: Literal["ESTABLISH", "MOBILIZE", "CONTROL", "OVERWHELM"]
+    force_stage_index: int = Field(ge=0, le=3)
+    force_target_population: int = Field(ge=0, le=48)
+    force_target_workers: int = Field(ge=0, le=18)
+    force_target_vanguards: int = Field(ge=0, le=14)
+    force_target_rangers: int = Field(ge=0, le=16)
+    force_worker_deficit: int = Field(ge=0, le=18)
+    force_vanguard_deficit: int = Field(ge=0, le=14)
+    force_ranger_deficit: int = Field(ge=0, le=16)
 
 
 class AdviserState(StrictModel):
@@ -116,7 +127,7 @@ class RedactedEvent(StrictModel):
 
 
 class Observation(StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     generated_at: datetime
     tick: int = Field(gt=0)
     agent: AgentState

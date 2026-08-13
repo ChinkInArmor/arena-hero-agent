@@ -99,6 +99,8 @@ class ArenaObservabilityTests(unittest.TestCase):
             last_core_survival_margin=6,
             scout_chunk_last_seen={(0, 0): 100},
             dedicated_scout_ids={"a"},
+            beacon_runner_id=None,
+            combat_patrol_ids={"defender"},
             strategic_parameters=BASELINE_PARAMETERS,
             current_strategic_context=context,
             strategic_controller=SimpleNamespace(adviser=FakeAdviser()),
@@ -116,6 +118,13 @@ class ArenaObservabilityTests(unittest.TestCase):
         self.assertNotIn("secret", encoded)
         self.assertEqual(observation["events"][0]["values"], {"damage": 2})
         self.assertEqual(observation["actions"], {"MOVE": 1, "SPAWN": 1})
+        self.assertEqual(observation["strategy"]["force_stage"], "MOBILIZE")
+        self.assertEqual(observation["strategy"]["force_target_population"], 26)
+        self.assertEqual(observation["strategy"]["force_worker_deficit"], 0)
+        self.assertEqual(observation["strategy"]["force_vanguard_deficit"], 3)
+        self.assertEqual(observation["strategy"]["force_ranger_deficit"], 4)
+        self.assertFalse(observation["battlefield"]["beacon_runner_active"])
+        self.assertEqual(observation["battlefield"]["combat_patrol_units"], 1)
 
     def test_async_writer_atomically_writes_snapshot_and_daily_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

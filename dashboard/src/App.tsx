@@ -50,6 +50,8 @@ interface Observation {
     core_survival_margin: number;
     scout_chunks: number;
     dedicated_scouts: number;
+    beacon_runner_active: boolean;
+    combat_patrol_units: number;
   };
   strategy: {
     phase: string;
@@ -67,6 +69,15 @@ interface Observation {
     safety_weight: number;
     beacon_priority: number;
     scout_percent: number;
+    force_stage: "ESTABLISH" | "MOBILIZE" | "CONTROL" | "OVERWHELM";
+    force_stage_index: number;
+    force_target_population: number;
+    force_target_workers: number;
+    force_target_vanguards: number;
+    force_target_rangers: number;
+    force_worker_deficit: number;
+    force_vanguard_deficit: number;
+    force_ranger_deficit: number;
   };
   adviser: {
     enabled: boolean;
@@ -140,6 +151,12 @@ const categoryNames: Record<string, string> = {
   COMBAT: "战斗",
   UNIT: "单位",
   SYSTEM: "系统",
+};
+const forceStageNames: Record<string, string> = {
+  ESTABLISH: "建立据点",
+  MOBILIZE: "全面动员",
+  CONTROL: "区域控制",
+  OVERWHELM: "军团压制",
 };
 const reasonNames: Record<string, string> = {
   emergency_safety_override: "紧急安全覆盖",
@@ -259,6 +276,9 @@ function App() {
   })), [history]);
 
   const observation = overview?.observation;
+  const forceProgress = observation
+    ? Math.min(100, Math.round(observation.population.total / Math.max(1, observation.strategy.force_target_population) * 100))
+    : 0;
   const status = error ? "unavailable" : overview?.status ?? "unavailable";
   const statusLabel = status === "healthy" ? "在线" : status === "stale" ? "数据陈旧" : "不可用";
 
@@ -357,6 +377,24 @@ function App() {
               <span><b>{observation?.strategy.vanguard_target ?? "--"}</b> Vanguard</span>
               <span><b>{observation?.strategy.ranger_target ?? "--"}</b> Ranger</span>
               <span><b>{observation?.strategy.scout_percent ?? "--"}%</b> Scout</span>
+            </div>
+          </section>
+
+          <section className="side-section force-section">
+            <div className="side-title"><Swords size={17} /><h2>军力阶段</h2><span className="small-status enabled">{forceProgress}%</span></div>
+            <div className="force-stage-header">
+              <div><span>当前阶段</span><strong>{forceStageNames[observation?.strategy.force_stage ?? ""] ?? "--"}</strong></div>
+              <b>{observation?.population.total ?? "--"} / {observation?.strategy.force_target_population ?? "--"}</b>
+            </div>
+            <div className="force-progress"><i style={{ width: `${forceProgress}%` }} /></div>
+            <div className="campaign-flags">
+              <span className={observation?.battlefield.beacon_runner_active ? "active" : ""}>信标执行者</span>
+              <span className={(observation?.battlefield.combat_patrol_units ?? 0) > 0 ? "active" : ""}>外围巡逻 {observation?.battlefield.combat_patrol_units ?? 0}</span>
+            </div>
+            <div className="force-rows">
+              <div><span>Worker</span><b>{observation?.population.workers ?? "--"} / {observation?.strategy.force_target_workers ?? "--"}</b><em>缺 {observation?.strategy.force_worker_deficit ?? "--"}</em></div>
+              <div><span>Vanguard</span><b>{observation?.population.vanguards ?? "--"} / {observation?.strategy.force_target_vanguards ?? "--"}</b><em>缺 {observation?.strategy.force_vanguard_deficit ?? "--"}</em></div>
+              <div><span>Ranger</span><b>{observation?.population.rangers ?? "--"} / {observation?.strategy.force_target_rangers ?? "--"}</b><em>缺 {observation?.strategy.force_ranger_deficit ?? "--"}</em></div>
             </div>
           </section>
 

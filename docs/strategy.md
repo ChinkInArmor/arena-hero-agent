@@ -14,7 +14,8 @@ Production has a validated baseline and evidence-driven strategic growth:
 | Baseline | `12 Worker + 3 Vanguard + 4 Ranger = 19` | Preserve the validated collection and defense envelope. |
 | Conservative growth | Up to 24 population | Retain the prior local profile while evidence is weak. |
 | Territorial growth | Bounded local limit up to 30 | Open only after saturated storage or a productive, low-congestion economic window. |
-| Pressure growth | Bounded local limit up to 32 | Shift marginal purchases toward combat when an enemy Core provides an authoritative opportunity. |
+| Control force | Bounded local limit up to 40 | Mobilize toward 18 Workers, 10 Vanguards, and 12 Rangers when a visible enemy Core provides authoritative pressure evidence. |
+| Overwhelm force | Validated adviser limit up to 48 | Permit at most 18 Workers, 14 Vanguards, and 16 Rangers when model advice passes the complete schema and local safety override. |
 | Emergency defense | At least the legacy population-25 slot | Permit a measured defender after safe evasion cannot be started. |
 
 The Agent calls the official SDK `unit_cost(unit_type, turn.state.population)`
@@ -38,6 +39,8 @@ never intentionally self-destructs Units to force a composition change.
   underlying attack, pursuit, recovery, and compatibility facts.
 - With the default `retreat` policy, migration candidates favor directions away from the Beacon and visible threats.
 - Guards are distributed around the Core instead of stacking on its cell or blocking Worker routes.
+- At population 26 or above, surplus combat Units may hold expanding perimeter posts when territory or combat weight is high. Core guards, raids, healing, immediate attacks, evasion, recovery, and compatibility hold take precedence.
+- A high-priority `CONTEST` posture may assign one surplus Vanguard as a Beacon runner after the Core is healthy, resources are sufficient, and no combat target or pressure is active. The Core does not migrate for this campaign.
 - Any observed Vanguard/Ranger movement enters a short alert that recalls missions, pauses expansion production, and reorients defenders. Lateral activity does not move the Core by itself.
 - An approaching enemy whose estimated time to attack range is at most 16 Ticks starts pre-emptive evasion. A confirmed distant pursuit also starts evasion before the normal 12-cell fallback trigger.
 - Recent attack positions remain actionable for exactly six planning Ticks when visibility is lost; event geometry and explicit actor IDs exclude unrelated enemies when possible.
