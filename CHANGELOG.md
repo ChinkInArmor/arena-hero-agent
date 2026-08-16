@@ -25,6 +25,14 @@ All notable changes to this project will be documented in this file. The format 
 - Resource targets now use deterministic minimum-cost Worker matching with limited intent stickiness instead of preserving a worse assignment indefinitely.
 - Scout routes prefer less recently covered chunks and rotate after three consecutive non-improving Ticks.
 
+### Fixed
+
+- Core delivery no longer deadlocks when a flushed Worker parks on the Core
+  and every passable Core neighbor is packed two cargo Workers deep: cargo
+  Workers can enter the Core while a single friendly unit resides on it, and
+  a resident Worker can vacate the Core through a single-friendly cell, so
+  the delivery ring drains and resource stock resumes growing.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added

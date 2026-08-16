@@ -824,8 +824,19 @@ def _queue_move(
 
         occupants = context.friendly_counts[destination]
         if occupants:
-            entering_core = allow_core_entry and destination == context.core_position
-            entering_allowed_friendly = destination == allow_friendly_entry
+            # The Core carries a phantom friendly occupant (see
+            # friendly_counts[core] += 1), so a count of 2 on the Core means
+            # one resident is parked there. Deposit must not be sealed shut
+            # by that resident: allow Core entry while a single real unit
+            # occupies it, and cap the Core at two real units.
+            entering_core = (
+                allow_core_entry
+                and destination == context.core_position
+                and occupants < 3
+            )
+            entering_allowed_friendly = (
+                destination == allow_friendly_entry and occupants < 2
+            )
             entering_single_friendly = (
                 allow_single_friendly_transit and occupants < 2
             )
@@ -833,7 +844,7 @@ def _queue_move(
                 entering_core
                 or entering_allowed_friendly
                 or entering_single_friendly
-            ) or occupants >= 2:
+            ):
                 continue
 
         unit.move(direction)
@@ -1199,10 +1210,15 @@ def _queue_toward(
     for cell, occupants in context.friendly_counts.items():
         if occupants <= 0 or cell == unit.position:
             continue
+        # friendly_counts adds a phantom occupant on the Core, so a cell
+        # count of 2 means exactly one real friendly unit is parked on it.
+        # A cargo worker must still be allowed to enter and deposit while a
+        # resident sits on the Core, or the delivery slot seals forever and
+        # every cargo worker stalls in RETURN_BLOCKED.
         entering_core = (
             allow_core_entry
             and cell == context.core_position
-            and occupants < 2
+            and occupants < 3
         )
         entering_target = allow_target_entry and cell == target and occupants < 2
         entering_single_friendly = (
@@ -3121,6 +3137,11 @@ class CoreFarmer:
             self._set_worker_mode(worker, "HARVEST", worker.position)
             return
 
+        # A resident flush worker stranded on the Core must be able to
+        # traverse a single-friendly neighbor to leave; without transit it
+        # can never exit a sealed 2-deep delivery ring and the Core stays
+        # occupied forever.
+        transit_from_core = worker.position == core_position
         if assigned_target is not None:
             self.scout_progress.pop(worker.id, None)
             if _queue_toward(
@@ -3128,6 +3149,7 @@ class CoreFarmer:
                 assigned_target,
                 context,
                 allow_target_entry=True,
+                allow_single_friendly_transit=transit_from_core,
                 discouraged=set(self.worker_history[worker.id]),
             ):
                 self._set_worker_mode(worker, "RESOURCE", assigned_target)
@@ -3168,6 +3190,7 @@ class CoreFarmer:
             worker,
             target,
             context,
+            allow_single_friendly_transit=transit_from_core,
             discouraged=set(self.worker_history[worker.id]),
         ):
             self._advance_scout(worker.id)
@@ -3181,6 +3204,7 @@ class CoreFarmer:
                 worker,
                 target,
                 context,
+                allow_single_friendly_transit=transit_from_core,
                 discouraged=set(self.worker_history[worker.id]),
             )
             if not moved:
@@ -3565,6 +3589,7 @@ class CoreFarmer:
                         worker,
                         _exploration_directions(worker),
                         context,
+                        allow_single_friendly_transit=True,
                     )
                     if not moved:
                         worker.wait()
