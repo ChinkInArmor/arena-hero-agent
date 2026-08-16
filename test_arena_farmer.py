@@ -2072,11 +2072,12 @@ class CoreFarmerTests(unittest.TestCase):
 
     def test_sealed_core_resident_does_not_block_deposit(self) -> None:
         tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
-        # Mirrors a production deadlock: a flushed worker parks on the Core
-        # and every passable Core neighbor is packed two cargo workers deep
-        # (the fourth neighbor is an obstacle). The Core slot never clears,
-        # so without the relaxed Core-entry rule no cargo worker can ever
-        # deposit and all of them stall in RETURN_BLOCKED.
+        # Mirrors a production deadlock: a flushed Worker parks on the Core
+        # and every passable Core neighbor is packed two cargo Workers deep
+        # (the fourth neighbor is an obstacle). The game enforces a
+        # single-unit limit on the Core cell, so the resident must vacate
+        # before any cargo Worker can deposit; a packed delivery ring seals
+        # it in forever.
         sealed = make_turn(
             tick=100,
             resources=31,
@@ -2096,34 +2097,62 @@ class CoreFarmerTests(unittest.TestCase):
         )
         tactic.choose_actions(sealed)
         sealed_plan = sealed.plan.model_dump(mode="json", exclude_none=True)
-        entered = [
-            identifier
-            for identifier in (
-                WORKER_2,
-                WORKER_3,
-                WORKER_4,
-                WORKER_5,
-                WORKER_6,
-                WORKER_7,
+        self.assertEqual(sealed_plan["unit_actions"][WORKER_1]["type"], "WAIT")
+        # Nobody can enter the occupied Core; a packed ring Worker steps
+        # aside instead so the ring thins and the Core slot can open.
+        self.assertTrue(
+            any(
+                sealed_plan["unit_actions"][identifier]["type"] == "MOVE"
+                for identifier in (
+                    WORKER_2,
+                    WORKER_3,
+                    WORKER_4,
+                    WORKER_5,
+                    WORKER_6,
+                    WORKER_7,
+                )
             )
-            if sealed_plan["unit_actions"][identifier]["type"] == "MOVE"
-        ]
-        self.assertEqual(entered, [WORKER_2])
-        self.assertNotIn(WORKER_1, entered)
+        )
 
-        # Next tick the cargo worker is on the Core and must deposit even
-        # though the resident still occupies it, and the resident must be
-        # able to leave through the ring cell the cargo worker vacated.
-        delivering = make_turn(
+        # With one ring cell single-deep the resident vacates through it
+        # and a cargo Worker enters the now-empty Core in the same tick.
+        thinned = make_turn(
             tick=101,
             resources=31,
             core_position=(0, 0),
             beacon_position=(10, 10),
             units=[
                 unit(WORKER_1, "WORKER", (0, 0), cargo=0),
-                unit(WORKER_2, "WORKER", (0, 0), cargo=1),
                 unit(WORKER_3, "WORKER", (1, 0), cargo=1),
                 unit(WORKER_4, "WORKER", (0, 1), cargo=1),
+                unit(WORKER_5, "WORKER", (0, 1), cargo=1),
+                unit(WORKER_6, "WORKER", (0, -1), cargo=1),
+                unit(WORKER_7, "WORKER", (0, -1), cargo=1),
+            ],
+            obstacles=[(-1, 0)],
+            resource_cells=[(5, 0), (0, 5)],
+        )
+        tactic.choose_actions(thinned)
+        thinned_plan = thinned.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(thinned_plan["unit_actions"][WORKER_1]["type"], "MOVE")
+        self.assertTrue(
+            any(
+                thinned_plan["unit_actions"][identifier]["type"] == "MOVE"
+                for identifier in (WORKER_3, WORKER_4, WORKER_5, WORKER_6, WORKER_7)
+            )
+        )
+
+        # The cargo Worker that reached the Core deposits on the next tick.
+        delivering = make_turn(
+            tick=102,
+            resources=31,
+            core_position=(0, 0),
+            beacon_position=(10, 10),
+            units=[
+                unit(WORKER_1, "WORKER", (1, 0), cargo=0),
+                unit(WORKER_2, "WORKER", (1, 1), cargo=1),
+                unit(WORKER_3, "WORKER", (2, 0), cargo=1),
+                unit(WORKER_4, "WORKER", (0, 0), cargo=1),
                 unit(WORKER_5, "WORKER", (0, 1), cargo=1),
                 unit(WORKER_6, "WORKER", (0, -1), cargo=1),
                 unit(WORKER_7, "WORKER", (0, -1), cargo=1),
@@ -2137,12 +2166,8 @@ class CoreFarmerTests(unittest.TestCase):
             exclude_none=True,
         )
         self.assertEqual(
-            delivering_plan["unit_actions"][WORKER_2]["type"],
+            delivering_plan["unit_actions"][WORKER_4]["type"],
             "DEPOSIT",
-        )
-        self.assertEqual(
-            delivering_plan["unit_actions"][WORKER_1]["type"],
-            "MOVE",
         )
 
     def test_visible_enemy_worker_does_not_disable_safe_delivery_handoff(self) -> None:

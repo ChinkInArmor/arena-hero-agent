@@ -795,6 +795,22 @@ def _exploration_directions(unit: Movable) -> tuple[Direction, ...]:
     return CARDINAL_DIRECTIONS[offset:] + CARDINAL_DIRECTIONS[:offset]
 
 
+def _ring_evacuation_directions(
+    position: Position,
+    core_position: Position,
+) -> tuple[Direction, ...]:
+    """Side-steps that keep a packed delivery-ring Worker near the Core."""
+    return tuple(
+        sorted(
+            CARDINAL_DIRECTIONS,
+            key=lambda direction: (
+                _distance(_destination(position, direction), core_position),
+                CARDINAL_DIRECTIONS.index(direction),
+            ),
+        )
+    )
+
+
 def _rotate_directions(
     directions: tuple[Direction, ...],
     offset: int,
@@ -824,15 +840,14 @@ def _queue_move(
 
         occupants = context.friendly_counts[destination]
         if occupants:
-            # The Core carries a phantom friendly occupant (see
-            # friendly_counts[core] += 1), so a count of 2 on the Core means
-            # one resident is parked there. Deposit must not be sealed shut
-            # by that resident: allow Core entry while a single real unit
-            # occupies it, and cap the Core at two real units.
+            # The game enforces a single-unit limit on the Core cell and
+            # friendly_counts adds a phantom occupant there, so a count of 2
+            # means one real friendly unit is parked on the Core and entry
+            # must wait until the resident vacates.
             entering_core = (
                 allow_core_entry
                 and destination == context.core_position
-                and occupants < 3
+                and occupants < 2
             )
             entering_allowed_friendly = (
                 destination == allow_friendly_entry and occupants < 2
@@ -844,7 +859,7 @@ def _queue_move(
                 entering_core
                 or entering_allowed_friendly
                 or entering_single_friendly
-            ):
+            ) or occupants >= 2:
                 continue
 
         unit.move(direction)
@@ -1210,15 +1225,14 @@ def _queue_toward(
     for cell, occupants in context.friendly_counts.items():
         if occupants <= 0 or cell == unit.position:
             continue
-        # friendly_counts adds a phantom occupant on the Core, so a cell
-        # count of 2 means exactly one real friendly unit is parked on it.
-        # A cargo worker must still be allowed to enter and deposit while a
-        # resident sits on the Core, or the delivery slot seals forever and
-        # every cargo worker stalls in RETURN_BLOCKED.
+        # friendly_counts adds a phantom occupant on the Core (the game
+        # enforces a single-unit limit on the Core cell), so a cell count of
+        # 2 means one real friendly unit is parked there and entry must be
+        # refused until the resident vacates.
         entering_core = (
             allow_core_entry
             and cell == context.core_position
-            and occupants < 3
+            and occupants < 2
         )
         entering_target = allow_target_entry and cell == target and occupants < 2
         entering_single_friendly = (
@@ -3605,6 +3619,25 @@ class CoreFarmer:
                 allow_core_entry=True,
                 allow_single_friendly_transit=True,
             )
+            if (
+                not moved
+                and _distance(worker.position, core.position) == 1
+                and context.friendly_counts[worker.position] >= 2
+            ):
+                # A 2-deep delivery ring with a resident Worker on the Core
+                # is a stable deadlock: nobody can enter the Core and the
+                # resident cannot leave through packed cells. Step aside to
+                # an empty or single-friendly neighbor so the ring thins and
+                # the Core slot opens again.
+                moved = _queue_move(
+                    worker,
+                    _ring_evacuation_directions(
+                        worker.position,
+                        core.position,
+                    ),
+                    context,
+                    allow_single_friendly_transit=True,
+                )
             if not moved:
                 worker.wait()
             self._set_worker_mode(

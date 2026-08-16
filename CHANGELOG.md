@@ -28,10 +28,13 @@ All notable changes to this project will be documented in this file. The format 
 ### Fixed
 
 - Core delivery no longer deadlocks when a flushed Worker parks on the Core
-  and every passable Core neighbor is packed two cargo Workers deep: cargo
-  Workers can enter the Core while a single friendly unit resides on it, and
-  a resident Worker can vacate the Core through a single-friendly cell, so
-  the delivery ring drains and resource stock resumes growing.
+  and every passable Core neighbor is packed two cargo Workers deep (the
+  game limits the Core cell to one unit, so the resident had to vacate
+  first, and packed ring cells sealed it in forever). A packed delivery-ring
+  Worker now steps aside to thin the ring, a resident Worker can vacate the
+  Core through a single-friendly cell, and a full-stock cargo Worker can
+  clear a sealed Core the same way, so deliveries resume and resource stock
+  keeps growing.
 
 ## [0.1.0] - 2026-08-03
 
