@@ -4551,6 +4551,190 @@ class CoreFarmerTests(unittest.TestCase):
             {"type": "SHOOT", "expected_cell": [3, 0]},
         )
 
+    def test_core_holds_position_under_direct_attack_with_defenders(self) -> None:
+        # B1: a Core under direct attack with adjacent defenders stands and
+        # fights instead of zig-zag relocating (the post-raid lesson).
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=200,
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (1, 0)),
+                unit(RANGER_1, "RANGER", (0, 1)),
+            ],
+            enemies=[unit(ENEMY_1, "RANGER", (0, 3), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertNotEqual(queued["core_action"]["type"], "START_MOVE")
+        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertTrue(tactic.combat_pressure_active)
+
+    def test_core_still_evades_nearby_enemy_without_defenders(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        turn = make_turn(
+            tick=200,
+            enemies=[unit(ENEMY_1, "RANGER", (0, 3), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["type"], "START_MOVE")
+
+    def test_moving_core_cancels_relocation_when_directly_attacked(self) -> None:
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.active_core_move_reason = "EVADE"
+        turn = make_turn(
+            tick=200,
+            core_state="MOVING",
+            move_direction="LEFT",
+            move_progress=1,
+            units=[
+                unit(VANGUARD_1, "VANGUARD", (1, 0)),
+                unit(VANGUARD_2, "VANGUARD", (0, 1)),
+                unit(RANGER_1, "RANGER", (2, 0)),
+            ],
+            enemies=[unit(ENEMY_1, "RANGER", (0, 3), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["type"], "CANCEL_MOVE")
+        self.assertEqual(tactic.last_core_cancel_reason, "HOLD_AND_FIGHT")
+
+    def test_evade_direction_held_inside_hold_window(self) -> None:
+        # B2: once an EVADE relocation starts, the same heading is reused for
+        # a few ticks even if the enemy moves to the opposite flank.
+        tactic = CoreFarmer(worker_target=1, beacon_policy="retreat")
+        first = make_turn(
+            tick=400,
+            beacon_position=(10, 0),
+            enemies=[unit(ENEMY_1, "VANGUARD", (3, 0), controlled=False)],
+        )
+        tactic.choose_actions(first)
+        first_plan = first.plan.model_dump(mode="json", exclude_none=True)
+        first_direction = first_plan["core_action"]["direction"]
+
+        second = make_turn(
+            tick=401,
+            beacon_position=(10, 0),
+            enemies=[unit(ENEMY_1, "VANGUARD", (-3, 0), controlled=False)],
+        )
+        tactic.choose_actions(second)
+        second_plan = second.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            second_plan["core_action"]["type"],
+            "START_MOVE",
+        )
+        self.assertEqual(
+            second_plan["core_action"]["direction"],
+            first_direction,
+        )
+
+    def test_combat_hold_lingers_after_contact_clears(self) -> None:
+        # C1: posture rises fast and falls slow; a single quiet tick cannot
+        # immediately reopen the economic spawn gates mid-battle.
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        tactic.choose_actions(
+            make_turn(
+                tick=300,
+                enemies=[unit(ENEMY_1, "RANGER", (10, 0), controlled=False)],
+            )
+        )
+        self.assertTrue(tactic.combat_pressure_active)
+        tactic.choose_actions(make_turn(tick=301, enemies=[]))
+        self.assertFalse(tactic.combat_pressure_active)
+        self.assertTrue(tactic._combat_hold_active(301))
+        self.assertFalse(tactic._combat_hold_active(309))
+
+    def test_combat_hold_blocks_worker_spawn_after_contact(self) -> None:
+        # C2: no worker recruitment while the combat hold is still active,
+        # even once the visible enemy has left the screen for a tick.
+        tactic = CoreFarmer(worker_target=2, beacon_policy="hold")
+        tactic.choose_actions(
+            make_turn(
+                tick=310,
+                resources=30,
+                units=[unit(WORKER_1, "WORKER", (5, 0), cargo=0)],
+                enemies=[unit(ENEMY_1, "RANGER", (10, 0), controlled=False)],
+            )
+        )
+        second = make_turn(
+            tick=311,
+            resources=30,
+            units=[unit(WORKER_1, "WORKER", (5, 0), cargo=0)],
+            enemies=[],
+        )
+        tactic.choose_actions(second)
+        self.assertTrue(tactic._combat_hold_active(311))
+        self.assertNotEqual(
+            second.plan.model_dump(mode="json", exclude_none=True)
+            .get("core_action", {})
+            .get("type"),
+            "SPAWN",
+        )
+
+    def test_full_stock_combat_spawns_defender_instead_of_waiting(self) -> None:
+        # A1/A3: with storage at the ceiling and a real threat at the Core,
+        # spend the overflow margin on a defender instead of idling through
+        # the engagement (prevents the death -> capacity shrink -> overflow
+        # cascade observed in the raid).
+        tactic = CoreFarmer(worker_target=1, beacon_policy="hold")
+        units = []
+        for index in range(3):
+            units.append(
+                unit(
+                    f"00000000-0000-4000-8000-0000000000{10 + index:02x}",
+                    "WORKER",
+                    (8 + index, 8),
+                    cargo=0,
+                )
+            )
+        for index in range(4):
+            units.append(
+                unit(
+                    f"00000000-0000-4000-8000-0000000000{20 + index:02x}",
+                    "VANGUARD",
+                    (4, index),
+                )
+            )
+        for index in range(5):
+            units.append(
+                unit(
+                    f"00000000-0000-4000-8000-0000000000{30 + index:02x}",
+                    "RANGER",
+                    (6, index),
+                )
+            )
+        turn = make_turn(
+            tick=500,
+            resources=55,
+            units=units,
+            enemies=[unit(ENEMY_1, "VANGUARD", (1, 0), controlled=False)],
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "VANGUARD")
+
+    def test_no_new_mining_while_fleet_is_engaged(self) -> None:
+        # A2: a worker at a mine stands down during combat instead of keeping
+        # the return lane congested and the Core refilled past its ceiling.
+        queued = plan(
+            make_turn(
+                tick=100,
+                resources=31,
+                units=[unit(WORKER_1, "WORKER", (1, 0), cargo=0)],
+                resource_cells=[(1, 0)],
+                enemies=[
+                    unit(
+                        ENEMY_1,
+                        "RANGER",
+                        (10, 0),
+                        controlled=False,
+                    )
+                ],
+            )
+        )
+        self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "WAIT")
+
 
 class ApiKeyLoadingTests(unittest.TestCase):
     def test_loads_ignored_env_file_without_logging_value(self) -> None:

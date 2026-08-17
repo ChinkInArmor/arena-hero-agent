@@ -126,6 +126,17 @@ CORE_DELIVERY_CHAIN_MAX = 8
 CORE_EVADE_TRIGGER_DISTANCE = 12
 CORE_EVADE_RELEASE_DISTANCE = CORE_EVADE_TRIGGER_DISTANCE + 2
 CORE_MOVE_COMMIT_PROGRESS = 2
+# A single unit death shrinks Core capacity by five; a stock pinned at the
+# capacity ceiling then overflows and the game destroys another Unit. Keep a
+# safety margin so ordinary attrition never turns into a resource cascade.
+OVERFLOW_SAFETY_PADDING = 5
+# Combat pressure lingers after the last contact so posture, recalling, and
+# worker dispatch do not flap ENGAGED<->NORMAL between single ticks.
+COMBAT_PRESSURE_LINGER_TICKS = 8
+# Direction hold for a relocating Core: repel flapping between escaped ticks.
+CORE_MOVE_DIRECTION_HOLD_TICKS = 8
+# A Core under direct attack stands and fights when defenders are adjacent.
+CORE_STAND_FIGHT_RADIUS = 5
 UNIT_EVADE_TRIGGER_DISTANCE = 5
 BEACON_RUNNER_MIN_POPULATION = 26
 BEACON_RUNNER_MIN_RESOURCES = 30
@@ -1594,6 +1605,8 @@ class CoreFarmer:
         self.recent_attack_threats: dict[UUID, RememberedThreat] = {}
         self.threat_assessment = ThreatAssessment()
         self.combat_pressure_active = False
+        self.combat_hold_until_tick = 0
+        self.core_move_direction_hold_until_tick = 0
         self.squad_return_ids: set[UUID] = set()
         self.scout_return_ids: set[UUID] = set()
         self.scout_cooldown_until: dict[UUID, int] = {}
@@ -1772,6 +1785,9 @@ class CoreFarmer:
             for tick, blocked in self.economic_blocked_history
             if tick >= window_start
         )
+        # A fully saturated stock skips the earnback/blocking window: any
+        # death then shrinks capacity and overflows the Core. Growth spends
+        # that dead margin before it can cascade.
         storage_saturated = turn.resource_space == 0
         return storage_saturated or (
             deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
@@ -2048,7 +2064,19 @@ class CoreFarmer:
             breakout=breakout,
             local_squad_contact=local_squad_contact,
         )
+        # Posture hysteresis (rise fast, fall slow): once anything engages the
+        # fleet, a separate combat hold lingers for a few ticks so one quiet
+        # tick cannot reopen economy gates mid-battle. combat_pressure_active
+        # itself stays faithful to the memory timers the tests assert.
+        if self.threat_assessment.combat_pressure:
+            self.combat_hold_until_tick = max(
+                self.combat_hold_until_tick,
+                turn.tick + COMBAT_PRESSURE_LINGER_TICKS,
+            )
         self.combat_pressure_active = self.threat_assessment.combat_pressure
+
+    def _combat_hold_active(self, tick: int) -> bool:
+        return self.combat_pressure_active or tick <= self.combat_hold_until_tick
 
     def _remembered_retreat_threats(
         self,
@@ -2771,6 +2799,9 @@ class CoreFarmer:
         self.pursuing_enemy_ids.clear()
         self.recent_attack_until_tick = 0
         self.recent_core_attack_until_tick = 0
+        self.combat_hold_until_tick = 0
+        self.combat_pressure_active = False
+        self.core_move_direction_hold_until_tick = 0
         self.recent_attack_threats.clear()
         self.squad_return_ids.clear()
         self.scout_return_ids.clear()
@@ -2923,6 +2954,12 @@ class CoreFarmer:
         tick: int,
         blocked: set[Position],
     ) -> dict[UUID, Position]:
+        # A2: while the fleet is engaged, do not open new mining runs; keep
+        # the economy from refilling the Core into another overflow cascade
+        # and keep workers off contested routes.
+        if self.combat_pressure_active:
+            self.resource_intents = {}
+            return {}
         available_resources = {
             cell for cell in self.resource_last_seen if cell not in blocked
         }
@@ -3142,6 +3179,13 @@ class CoreFarmer:
         assigned_target: Position | None,
         context: MovementContext,
     ) -> None:
+        if self.combat_pressure_active:
+            # A2: no new mining while the fleet is engaged; an idle Worker
+            # holds instead of opening a contested route back.
+            worker.wait()
+            self.scout_progress.pop(worker.id, None)
+            self._set_worker_mode(worker, "COMBAT_HOLD")
+            return
         if (
             assigned_target == worker.position
             and worker.position in current_resources
@@ -4415,21 +4459,69 @@ class CoreFarmer:
         core = turn.core
         if core is None:
             return False
-        direction = _retreat_direction(
-            core.position,
-            turn.beacon.position,
-            enemies,
-            context.obstacles,
-            self._core_blocked_cells(turn, context),
-            self.last_retreat_direction,
-            allow_beacon_approach=reason == "EVADE",
-        )
+        # Direction stability: once an EVADE relocation begins, keep the same
+        # heading for a few ticks instead of re-evaluating every tick and
+        # zig-zagging while a pursuing force circles the Core.
+        held_direction = None
+        if (
+            reason == "EVADE"
+            and self.last_retreat_direction is not None
+            and turn.tick < self.core_move_direction_hold_until_tick
+        ):
+            held_destination = _destination(
+                core.position, self.last_retreat_direction
+            )
+            if (
+                held_destination not in self._core_blocked_cells(turn, context)
+                and _is_signed_int64_position(held_destination)
+            ):
+                held_direction = self.last_retreat_direction
+        if held_direction is not None:
+            direction = held_direction
+        else:
+            direction = _retreat_direction(
+                core.position,
+                turn.beacon.position,
+                enemies,
+                context.obstacles,
+                self._core_blocked_cells(turn, context),
+                self.last_retreat_direction,
+                allow_beacon_approach=reason == "EVADE",
+            )
         if direction is None:
             return False
+        if reason == "EVADE":
+            self.core_move_direction_hold_until_tick = (
+                turn.tick + CORE_MOVE_DIRECTION_HOLD_TICKS
+            )
         core.start_move(direction)
         self.last_retreat_direction = direction
         self.active_core_move_reason = reason
         return True
+
+    def _core_has_standing_fight(
+        self,
+        turn: Turn,
+        enemies: Sequence[object],
+    ) -> bool:
+        """Defenders are adjacent enough to answer a direct Core attack."""
+        core = turn.core
+        if core is None or not enemies:
+            return False
+        combat_enemies = tuple(
+            enemy
+            for enemy in enemies
+            if getattr(enemy, "kind", None) != "CORE"
+            and enemy.unit_type in {UnitType.VANGUARD, UnitType.RANGER}
+        )
+        if not combat_enemies:
+            return False
+        nearby_defenders = sum(
+            1
+            for unit in (*turn.vanguards, *turn.rangers)
+            if _distance(unit.position, core.position) <= CORE_STAND_FIGHT_RADIUS
+        )
+        return nearby_defenders >= len(combat_enemies)
 
     def _moving_core_should_cancel(
         self,
@@ -4445,6 +4537,17 @@ class CoreFarmer:
             return False
 
         self.last_core_cancel_reason = "NONE"
+        # A Core relocating under direct attack gains nothing: the raiders
+        # keep shooting it while it zig-zags and defenders waste turns
+        # chasing it. If local defenders can answer the attackers, stop and
+        # fight instead of relocating.
+        if (
+            self.active_core_move_reason == "EVADE"
+            and projected_core_damage > 0
+            and self._core_has_standing_fight(turn, enemies)
+        ):
+            self.last_core_cancel_reason = "HOLD_AND_FIGHT"
+            return True
         destination = core.view.destination
         if destination in self._core_blocked_cells(turn, context):
             self.last_core_cancel_reason = "DESTINATION_BLOCKED"
@@ -4644,6 +4747,10 @@ class CoreFarmer:
                 or self.pursuing_enemy_ids
                 or turn.tick <= self.recent_core_attack_until_tick
             )
+            and not (
+                projected_core_damage > 0
+                and self._core_has_standing_fight(turn, retreat_enemies)
+            )
             and self._start_core_retreat(
                 turn,
                 context,
@@ -4727,7 +4834,33 @@ class CoreFarmer:
                 self.pending_conditional_spawn_tick = turn.tick
             return
 
+        # A1/A3 forced spawn at a full storage ceiling is handled later: the
+        # peaceful saturated-growth chain below already spends the margin, and
+        # the combat branch just below keeps defenders flowing while engaged.
         if self.combat_pressure_active:
+            # A1/A3: with the stock pinned at the storage ceiling, any death
+            # shrinks capacity and overflows the Core, destroying another Unit
+            # per tick. When the threat is actually at the Core, defend first:
+            # spend the overflow margin on a cheap defender instead of idling
+            # through the whole engagement. Distant-only activity (ALERT from
+            # a far enemy) keeps pausing production as before.
+            direct_core_threat = (
+                (nearest_threat is not None and nearest_threat <= CORE_EVADE_TRIGGER_DISTANCE)
+                or turn.tick <= self.recent_core_attack_until_tick
+            )
+            if (
+                not self.compatibility_hold
+                and direct_core_threat
+                and turn.resource_space <= OVERFLOW_SAFETY_PADDING
+                and production_budget.resources >= production_budget.vanguard_cost
+                and population
+                < max(
+                    ABSOLUTE_POPULATION_LIMIT,
+                    self.strategic_parameters.population_limit,
+                )
+            ):
+                core.spawn(UnitType.VANGUARD)
+                return
             core.wait()
             return
 
@@ -4772,7 +4905,8 @@ class CoreFarmer:
                     population,
                 )
             economic_expansion_is_safe = (
-                nearest_threat is None or nearest_threat > 6
+                not self.combat_pressure_active
+                and (nearest_threat is None or nearest_threat > 6)
             )
             if (
                 len(turn.workers) < self.worker_target
@@ -4834,6 +4968,7 @@ class CoreFarmer:
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) >= DEFENSE_RANGER_TARGET
                 and nearest_threat is None
+                and not self.combat_pressure_active
                 and self._growth_is_ready(
                     turn,
                     next_worker_cost=strategic_cost,
@@ -5192,6 +5327,8 @@ def _position_diagnostics(turn: Turn, tactic: CoreFarmer) -> str:
         f"recent_attack_until={tactic.recent_attack_until_tick} "
         f"recent_core_attack_until={tactic.recent_core_attack_until_tick} "
         f"combat_pressure={int(tactic.combat_pressure_active)} "
+        f"combat_hold={int(tactic._combat_hold_active(turn.tick))} "
+        f"combat_hold_until={tactic.combat_hold_until_tick} "
         f"squad_return={len(tactic.squad_return_ids)} "
         f"scout_return={len(tactic.scout_return_ids)} "
         f"squad_disengage_until={tactic.squad_disengage_until_tick} "

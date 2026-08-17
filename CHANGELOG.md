@@ -36,6 +36,26 @@ All notable changes to this project will be documented in this file. The format 
   clear a sealed Core the same way, so deliveries resume and resource stock
   keeps growing.
 
+### Changed
+
+- A Core under direct attack with adjacent defenders now stands and fights
+  instead of relocating: the raid replay showed 8 core relocations in 90
+  ticks with the defenders chasing the zig-zagging Core and nearly zero
+  return fire. EVADE now cancels once the Core is actually being hit and
+  defenders can answer, and an EVADE relocation keeps its direction for a
+  few ticks instead of flipping every time the raider crosses.
+- Combat pressure is sticky: the tactical loop rises to ENGAGED instantly
+  but now holds a few ticks after the last contact, so posture, recall and
+  economy gates do not flap mid-battle. Worker recruitment stays suppressed
+  while the hold is active, and idle workers stop opening new mining runs
+  while the fleet is engaged.
+- A stock pinned at the storage ceiling no longer idles during combat: any
+  unit death shrinks capacity by five and overflows the Core
+  (CORE_RESOURCE_OVERFLOW_DESTROYED), destroying one unit per tick. With a
+  real threat at the Core and storage within the safety padding, the Core
+  spends the overflow margin on a defender instead of waiting through the
+  engagement.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added
