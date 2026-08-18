@@ -98,16 +98,66 @@ function TacticalMap({ state, selected, onSelect, onTarget }: {
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [layers, setLayers] = useState<Set<Layer>>(new Set(["resources", "obstacles", "enemies", "routes"]));
+  const [hover, setHover] = useState<{ x: number; y: number; title: string; detail: string } | null>(null);
+  const [drawVersion, setDrawVersion] = useState(0);
   const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
+  const centered = useRef(false);
+  const hoverRef = useRef<typeof hover>(null);
+  const viewRef = useRef({ scale, offset });
+  viewRef.current = { scale, offset };
   const core = state.objects.find((item) => item.kind === "CORE");
+
+  // 缩放锚定：把锚点（光标 / 画布中心）保持在原屏幕位置，
+  // offset 必须随 scale 同步变化，否则绕左上角缩放、视角漂移。
+  const zoomBy = useCallback((factor: number, anchor: { x: number; y: number }) => {
+    const { scale: current, offset: currentOffset } = viewRef.current;
+    const next = Math.min(2.5, Math.max(0.4, current * factor));
+    if (next === current) return;
+    const ratio = next / current;
+    setScale(next);
+    setOffset({
+      x: anchor.x - (anchor.x - currentOffset.x) * ratio,
+      y: anchor.y - (anchor.y - currentOffset.y) * ratio,
+    });
+  }, []);
 
   const centerCore = useCallback(() => {
     if (!core || !canvasRef.current) return;
     const canvas = canvasRef.current;
-    setOffset({ x: canvas.clientWidth / 2 - core.x * cellSize * scale, y: canvas.clientHeight / 2 - core.y * cellSize * scale });
-  }, [core, scale]);
+    const { scale: current } = viewRef.current;
+    setOffset({ x: canvas.clientWidth / 2 - core.x * cellSize * current, y: canvas.clientHeight / 2 - core.y * cellSize * current });
+  }, [core]);
 
-  useEffect(() => { centerCore(); }, [state.tick]);
+  // 仅在地图首次拿到 Core 时定位一次取景；Tick 轮询更新不再重置用户
+  // 缩放/平移后的视角（修复“每 5 秒自动回中”）。
+  useEffect(() => {
+    if (core && !centered.current) {
+      centered.current = true;
+      centerCore();
+    }
+  }, [core, centerCore]);
+
+  // React 的 onWheel 走被动监听、preventDefault 无效，改挂原生非被动监听。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      zoomBy(event.deltaY > 0 ? 0.9 : 1.1, { x: event.clientX - rect.left, y: event.clientY - rect.top });
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [zoomBy]);
+
+  // 容器尺寸变化（窗口缩放、侧栏展开）时强制重绘，避免画布模糊。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => setDrawVersion((version) => version + 1));
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -158,16 +208,34 @@ function TacticalMap({ state, selected, onSelect, onTarget }: {
       ctx.fillStyle = "#0d1215"; ctx.font = `${Math.max(8, step * .28)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(unit.unit_type[0], p.x, p.y);
     });
-  }, [state, selected, scale, offset, layers, core]);
+  }, [state, selected, scale, offset, layers, core, drawVersion]);
 
   const mapPoint = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return { x: Math.round((event.clientX - rect.left - offset.x) / (cellSize * scale)), y: Math.round((event.clientY - rect.top - offset.y) / (cellSize * scale)) };
   };
+  // 悬停信息：命中单位/对象时显示 HP、模式、目标等工具提示。
+  const updateHover = (clientX: number, clientY: number) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const target = mapPoint({ clientX, clientY, currentTarget: canvasRef.current } as React.MouseEvent<HTMLCanvasElement>);
+    const unit = state.units.find((item) => item.x === target.x && item.y === target.y);
+    const object = !unit && state.objects.find((item) => item.x === target.x && item.y === target.y);
+    const kindLabels: Record<string, string> = { CORE: "Core", ENEMY_CORE: "敌方 Core", RESOURCE: "资源", OBSTACLE: "障碍", BEACON: "信标", ENEMY_UNIT: "敌方单位" };
+    const next = unit
+      ? { x: clientX - rect.left, y: clientY - rect.top, title: `${unit.unit_type} · HP ${unit.hp}`, detail: `${unit.mode}${unit.cargo ? ` · 载货 ${unit.cargo}` : ""}${unit.target_x != null ? ` → ${unit.target_x},${unit.target_y}` : ""}` }
+      : object
+        ? { x: clientX - rect.left, y: clientY - rect.top, title: kindLabels[object.kind] ?? object.kind, detail: [object.unit_type, object.hp != null ? `HP ${object.hp}` : null, object.shield != null ? `SH ${object.shield}` : null].filter(Boolean).join(" · ") + (object.last_seen_tick ? ` · 末见 T${object.last_seen_tick}` : "") }
+        : null;
+    if (hoverRef.current?.title !== next?.title || hoverRef.current?.x !== next?.x || hoverRef.current?.y !== next?.y || (hoverRef.current === null) !== (next === null)) {
+      hoverRef.current = next;
+      setHover(next);
+    }
+  };
   return <div className="tactical-map-wrap">
     <canvas ref={canvasRef}
       onMouseDown={(event) => { drag.current = { x: event.clientX, y: event.clientY, ox: offset.x, oy: offset.y }; }}
-      onMouseMove={(event) => { if (drag.current) setOffset({ x: drag.current.ox + event.clientX - drag.current.x, y: drag.current.oy + event.clientY - drag.current.y }); }}
+      onMouseMove={(event) => { if (drag.current) setOffset({ x: drag.current.ox + event.clientX - drag.current.x, y: drag.current.oy + event.clientY - drag.current.y }); else updateHover(event.clientX, event.clientY); }}
       onMouseUp={(event) => {
         const start = drag.current; drag.current = null;
         if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) < 4) {
@@ -176,19 +244,20 @@ function TacticalMap({ state, selected, onSelect, onTarget }: {
           if (unit) onSelect(unit.id, event.shiftKey); else onTarget(target.x, target.y);
         }
       }}
-      onMouseLeave={() => { drag.current = null; }}
-      onWheel={(event) => { event.preventDefault(); setScale((value) => Math.min(2.5, Math.max(.4, value * (event.deltaY > 0 ? .9 : 1.1)))); }}
+      onMouseLeave={() => { drag.current = null; hoverRef.current = null; setHover(null); }}
+      onMouseOut={() => { drag.current = null; }}
     />
+    {hover && <div className="map-tooltip" style={{ left: hover.x, top: hover.y }}><b>{hover.title}</b><span>{hover.detail}</span></div>}
     <div className="map-actions">
-      <button title="缩小" onClick={() => setScale((v) => Math.max(.4, v - .2))}><Minus size={16}/></button>
-      <button title="放大" onClick={() => setScale((v) => Math.min(2.5, v + .2))}><Plus size={16}/></button>
+      <button title="缩小" onClick={() => { const rect = canvasRef.current?.getBoundingClientRect(); zoomBy(0.8, rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 }); }}><Minus size={16}/></button>
+      <button title="放大" onClick={() => { const rect = canvasRef.current?.getBoundingClientRect(); zoomBy(1.25, rect ? { x: rect.width / 2, y: rect.height / 2 } : { x: 0, y: 0 }); }}><Plus size={16}/></button>
       <button title="定位 Core" onClick={centerCore}><LocateFixed size={16}/></button>
       <div className="layer-menu"><Layers3 size={15}/>{(["resources","obstacles","enemies","routes"] as Layer[]).map((layer) => <label key={layer}><input type="checkbox" checked={layers.has(layer)} onChange={() => setLayers((value) => { const next=new Set(value); next.has(layer)?next.delete(layer):next.add(layer); return next; })}/>{layer}</label>)}</div>
     </div>
   </div>;
 }
 
-export default function TacticalConsole() {
+export default function TacticalConsole({ active = true }: { active?: boolean }) {
   const [state, setState] = useState<TacticalState | null>(null);
   const [history, setHistory] = useState<TacticalState[]>([]);
   const [receipts, setReceipts] = useState<Receipt[]>([]);
@@ -199,7 +268,18 @@ export default function TacticalConsole() {
   const [csrf, setCsrf] = useState("");
   const [ttl, setTtl] = useState(32);
   const [weights, setWeights] = useState({worker:4,vanguard:1,ranger:1});
+  const [weightsTouched, setWeightsTouched] = useState(false);
   const [message, setMessage] = useState("");
+
+  // csrf 独立拉取一次即可，避免作为 load 依赖导致每次 setCsrf 后 effect 重跑、
+  // 产生“双重加载”与重复轮询（配 tab 切换时状态重置问题一并修复）。
+  useEffect(() => {
+    let cancelled = false;
+    requestJson<{csrf_token:string}>("/api/v1/tactical/csrf")
+      .then((value) => { if (!cancelled) setCsrf(value.csrf_token); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -208,12 +288,37 @@ export default function TacticalConsole() {
         requestJson<{items:Receipt[]}>("/api/v1/tactical/receipts?limit=40"),
       ]);
       setState(next); setReceipts(audit.items);
-      if (!csrf) setCsrf((await requestJson<{csrf_token:string}>("/api/v1/tactical/csrf")).csrf_token);
     } catch { setMessage("战术状态暂时不可用"); }
-  }, [csrf]);
-  useEffect(() => { void load(); const timer=window.setInterval(() => { if(live) void load(); }, 5000); return () => clearInterval(timer); }, [load, live]);
+  }, []);
+  // 后台标签页暂停轮询，回到前台立即补一次，避免双视图 + 后台重复请求。
+  useEffect(() => {
+    if (!active) return;
+    void load();
+    const onVisible=() => { if(!document.hidden && live) void load(); };
+    const timer=window.setInterval(() => { if(live && !document.hidden) void load(); }, 5000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [load, live, active]);
   const view = live ? state : history[historyIndex] ?? state;
   const selectedUnits = useMemo(() => view?.units.filter((unit) => selected.has(unit.id)) ?? [], [view, selected]);
+
+  // 生产权重从后端快照同步（WORKER/VANGUARD/RANGER 大写键）。用户拖动滑块后
+  // 以其输入为准（weightsTouched）；应用成功后后端回显一致值，解除锁定继续同步。
+  useEffect(() => {
+    if (!state) return;
+    const raw = state.production_weights ?? {};
+    const synced = {
+      worker: raw.WORKER ?? weights.worker,
+      vanguard: raw.VANGUARD ?? weights.vanguard,
+      ranger: raw.RANGER ?? weights.ranger,
+    };
+    if (weightsTouched) {
+      const equal = synced.worker === weights.worker && synced.vanguard === weights.vanguard && synced.ranger === weights.ranger;
+      if (equal) setWeightsTouched(false);
+      return;
+    }
+    setWeights(synced);
+  }, [state]);
 
   async function send(payload: Record<string, unknown>, method="POST", path="/api/v1/tactical/commands") {
     try {
@@ -240,7 +345,7 @@ export default function TacticalConsole() {
       <aside className="command-panel">
         <section><div className="command-title"><Target size={16}/><h2>坐标派遣</h2></div><div className="coordinate-readout"><span>已选 {selected.size}</span><b>{target?`${target.x}, ${target.y}`:"在地图选择目标"}</b></div><label>TTL <input type="number" min="1" max="64" value={ttl} onChange={e=>setTtl(Number(e.target.value))}/></label><div className="command-buttons"><button disabled={!target||!selected.size||!live} onClick={()=>void send({kind:"MOVE_UNITS",unit_ids:[...selected],target_x:target?.x,target_y:target?.y,ttl_ticks:ttl})}><Send size={15}/>派遣单位</button><button disabled={!target||!live} onClick={()=>void send({kind:"MOVE_CORE",target_x:target?.x,target_y:target?.y,ttl_ticks:ttl})}><Crosshair size={15}/>移动 Core</button></div>{selectedUnits.map(unit=><div className="selected-unit" key={unit.id}><i style={{background:unitColors[unit.unit_type]}}/><span>{unit.unit_type} · {unit.x},{unit.y}</span><b>{unit.mode}</b><button title="取消控制" onClick={()=>setSelected(s=>{const n=new Set(s);n.delete(unit.id);return n})}><X size={13}/></button></div>)}</section>
         <section><div className="command-title"><Flag size={16}/><h2>远征队</h2></div><div className="expedition-create"><input id="expedition-name" placeholder="远征名称" defaultValue="远征队 1"/><input id="expedition-v" type="number" min="0" max="32" defaultValue="2" title="Vanguard"/><input id="expedition-r" type="number" min="0" max="32" defaultValue="2" title="Ranger"/><button disabled={!target||!live} onClick={()=>{const name=(document.querySelector('#expedition-name') as HTMLInputElement).value;const v=Number((document.querySelector('#expedition-v') as HTMLInputElement).value);const r=Number((document.querySelector('#expedition-r') as HTMLInputElement).value);void send({kind:"SET_EXPEDITION",expedition_id:`exp-${Date.now()}`,name,target_x:target?.x,target_y:target?.y,vanguard_count:v,ranger_count:r,ttl_ticks:ttl});}}><Plus size={14}/></button></div>{view.expeditions.map(item=><div className="expedition-row" key={item.id}><div><b>{item.name}</b><span>{item.vanguard_count}V · {item.ranger_count}R → {item.target_x},{item.target_y}</span></div><button title="删除远征" onClick={()=>void send({kind:"DELETE_EXPEDITION",expedition_id:item.id})}><Trash2 size={14}/></button></div>)}</section>
-        <section><div className="command-title"><SlidersHorizontal size={16}/><h2>生产权重</h2></div>{([['worker','Worker'],['vanguard','Vanguard'],['ranger','Ranger']] as const).map(([key,label])=><label className="weight-control" key={key}><span>{label}</span><input type="range" min="0" max="10" value={weights[key]} onChange={e=>setWeights({...weights,[key]:Number(e.target.value)})}/><b>{weights[key]}</b></label>)}<button className="full-command" disabled={!live||!Object.values(weights).some(Boolean)} onClick={()=>void send({kind:"SET_PRODUCTION_WEIGHTS",worker_weight:weights.worker,vanguard_weight:weights.vanguard,ranger_weight:weights.ranger,ttl_ticks:ttl})}>应用生产权重</button></section>
+        <section><div className="command-title"><SlidersHorizontal size={16}/><h2>生产权重</h2></div>{([['worker','Worker'],['vanguard','Vanguard'],['ranger','Ranger']] as const).map(([key,label])=><label className="weight-control" key={key}><span>{label}</span><input type="range" min="0" max="10" value={weights[key]} onChange={e=>{setWeightsTouched(true); setWeights({...weights,[key]:Number(e.target.value)})}}/><b>{weights[key]}</b></label>)}<button className="full-command" disabled={!live||!Object.values(weights).some(Boolean)} onClick={()=>void send({kind:"SET_PRODUCTION_WEIGHTS",worker_weight:weights.worker,vanguard_weight:weights.vanguard,ranger_weight:weights.ranger,ttl_ticks:ttl})}>应用生产权重</button></section>
         <section className="audit-section"><div className="command-title"><Users size={16}/><h2>命令与审计</h2></div>{view.active_commands.map(item=><div className="audit-row active" key={`${item.command_id}-${item.unit_id}`}><div><b>{item.mode}</b><span>→ {item.target_x},{item.target_y} · 到期 {item.expires_tick}</span></div>{!item.command_id.startsWith('expedition:')&&<button title="取消命令" onClick={()=>void send({},"DELETE",`/api/v1/tactical/commands/${item.command_id}`)}><Ban size={14}/></button>}</div>)}{receipts.slice(0,12).map(item=><div className="audit-row" key={`${item.command_id}-${item.tick}`}><span className={`receipt receipt-${item.status.toLowerCase()}`}>{item.status}</span><div><b>{item.reason}</b><span>Tick {item.tick} · {item.affected_count} 对象</span></div></div>)}</section>
         {message&&<div className="command-message">{message}</div>}
       </aside>

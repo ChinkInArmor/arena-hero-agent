@@ -252,19 +252,26 @@ function App() {
     }
   }, []);
 
+  // 仅在运维视图且页面可见时轮询 overview/events；战术视图有自己的轮询，
+  // 后台标签页暂停，避免双视图重复请求（约 7 请求/5 秒）。
   useEffect(() => {
+    if (view !== "operations") return;
     void loadOverview();
-    const timer = window.setInterval(() => void loadOverview(), 5000);
-    return () => window.clearInterval(timer);
-  }, [loadOverview]);
+    const timer = window.setInterval(() => { if (!document.hidden) void loadOverview(); }, 5000);
+    const onVisible = () => { if (document.visibilityState === "visible") void loadOverview(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [loadOverview, view]);
 
+  // 趋势图只在 range 变化时拉取一次，不再随 tick 轮询全量重拉。
   useEffect(() => {
+    if (view !== "operations") return;
     let cancelled = false;
     getJson<{ points: HistoryPoint[] }>(`/api/v1/history?range=${range}`)
       .then((value) => { if (!cancelled) setHistory(value.points); })
       .catch(() => { if (!cancelled) setHistory([]); });
     return () => { cancelled = true; };
-  }, [range, overview?.observation?.tick]);
+  }, [range, view]);
 
   const chartData = useMemo(() => history.map((point) => ({
     time: formatTime(point.observed_at ?? point.hour_start),
@@ -306,7 +313,8 @@ function App() {
         </div>
       </header>
 
-      {view === "tactical" ? <TacticalConsole /> : <>
+      <TacticalConsole active={view === "tactical"} />
+      <div style={{ display: view === "tactical" ? "none" : "contents" }}>
       {status !== "healthy" && (
         <div className={`notice notice-${status}`}>
           <CircleAlert size={17} />
@@ -430,7 +438,7 @@ function App() {
           </section>
         </aside>
       </section>
-      </>}
+      </div>
     </main>
   );
 }
