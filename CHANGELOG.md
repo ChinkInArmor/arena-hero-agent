@@ -35,6 +35,14 @@ All notable changes to this project will be documented in this file. The format 
   Core through a single-friendly cell, and a full-stock cargo Worker can
   clear a sealed Core the same way, so deliveries resume and resource stock
   keeps growing.
+- Full-stock delivery no longer storms a Core that cannot accept cargo: at
+  a saturated stock the carrier on the Core holds position (CORE_HOLD)
+  instead of being evicted each tick, other carriers wait in the ring
+  (RING_HOLD) or at distance (STOCKPILE_HOLD), and the delivery-ring chain
+  can start from a doubly-occupied neighbor so a sealed ring frees the Core
+  for a spawn that spends the surplus. Production environments showed ~85% of
+  ticks with 10+ RETURN_BLOCKED carriers frozen at a full stock; the sealed
+  ring now opens and the stock drains again.
 
 ### Changed
 

@@ -822,6 +822,40 @@ def _ring_evacuation_directions(
     )
 
 
+def _ring_escape_directions(
+    position: Position,
+    core_position: Position,
+    context: MovementContext,
+) -> tuple[Direction, ...]:
+    """Prefer outward moves that leave the sealed delivery ring.
+
+    When every ring cell around the Core holds >= 2 units the ring is
+    sealed: no step-aside within distance 1 is possible.  Outward moves
+    to an empty distance-2 cell are ranked first so a blocked carrier
+    can walk out of the ring instead of waiting forever; the ring thins
+    and the Core slot reopens.
+    """
+
+    def rank(direction: Direction) -> tuple[int, int, int]:
+        destination = _destination(position, direction)
+        occupants = context.friendly_counts[destination]
+        distance = _distance(destination, core_position)
+        # 1) empty cells farthest from the core (escape), 2) empty cells,
+        # 3) cells closer to the core (allow single transit), then tie-break
+        # by compass order.
+        if occupants == 0 and distance >= 2:
+            return (0, -distance, CARDINAL_DIRECTIONS.index(direction))
+        if occupants == 0:
+            return (1, -distance, CARDINAL_DIRECTIONS.index(direction))
+        if occupants == 1 and distance >= 2:
+            return (2, -distance, CARDINAL_DIRECTIONS.index(direction))
+        if occupants == 1:
+            return (3, -distance, CARDINAL_DIRECTIONS.index(direction))
+        return (4, -distance, CARDINAL_DIRECTIONS.index(direction))
+
+    return tuple(sorted(CARDINAL_DIRECTIONS, key=rank))
+
+
 def _rotate_directions(
     directions: tuple[Direction, ...],
     offset: int,
@@ -1109,28 +1143,39 @@ def _queue_core_delivery_handoff(
         and position not in context.reserved_destinations
     ]
     if open_neighbors:
-        if departing_worker.cargo > 0 and turn.resource_space == 0:
-            direction, _ = open_neighbors[0]
-            if _queue_move(departing_worker, (direction,), context):
-                context.reserved_destinations.add(core.position)
-                return {departing_worker.id}
-        # Normal resource/scout routing clears a free lane without overriding
-        # useful work. Coordination is needed only when all exits are occupied.
+        # 满仓（resource_space == 0）时不要把 Core 上的承运者赶走：
+        # 它占位等待空间开放后立刻交付（CORE_HOLD），赶走只会让
+        # 后续 worker 冲击一个进不去的 Core，形成 RETURN_BLOCKED 死锁。
+        # 正常资源/侦察路由清空空闲通道时不覆盖有用的工作。
+        # 仅在所有出口都被占用时才需要协调。
         return set()
 
     units_by_position = {
         unit.position: unit
         for unit in turn.units
-        if context.friendly_counts[unit.position] == 1
+        if context.friendly_counts[unit.position] >= 1
     }
+    # 密封环（Core 全部邻格 2 人共站）也需要启动链式疏散：从双人
+    # 邻格取走一个 worker 后该格降为 1 人，Core 上的承运者便能通过
+    # allow_single_friendly_transit 进入。仅当 Core 上有要交付的满载
+    # worker（或满仓待交付）时启用；纯空 resident 由 ring step-aside
+    # 开路，保留已有的疏散语义。
+    need_clear = any(
+        worker.cargo > 0 or turn.resource_space == 0
+        for worker in core_workers
+    )
     starts = sorted(
         (
             (position, units_by_position.get(position), index)
             for index, (_, position) in enumerate(passable_neighbors)
-            if context.friendly_counts[position] == 1
-            and position in units_by_position
+            if position in units_by_position
+            and (
+                context.friendly_counts[position] == 1
+                or (need_clear and context.friendly_counts[position] == 2)
+            )
         ),
         key=lambda item: (
+            int(not need_clear and context.friendly_counts[item[0]] > 1),
             int(getattr(item[1], "cargo", 0) > 0),
             item[2],
         ),
@@ -3642,10 +3687,19 @@ class CoreFarmer:
                 elif core.view.state is not CoreState.NORMAL:
                     worker.wait()
                     self._set_worker_mode(worker, "WAIT_CORE", core.position)
-                else:
+                elif turn.resource_space == 0:
+                    # 满仓：让出 Core。一个满载 worker 占着 Core 会把
+                    # friendly_counts[core] 顶到 2，导致 can_spawn=False，
+                    # 核心无法通过 spawn 消耗资源解锁，形成永久死锁。
+                    # 优先向外逃逸到距离 2 的空格（密封环时唯一出路），
+                    # 这样 spawn 可行 -> 消耗库存 -> 空间开放 -> 交付恢复。
                     moved = _queue_move(
                         worker,
-                        _exploration_directions(worker),
+                        _ring_escape_directions(
+                            worker.position,
+                            core.position,
+                            context,
+                        ),
                         context,
                         allow_single_friendly_transit=True,
                     )
@@ -3655,6 +3709,50 @@ class CoreFarmer:
                         worker,
                         "CLEAR_CORE" if moved else "CLEAR_CORE_BLOCKED",
                     )
+                continue
+            if turn.resource_space == 0:
+                # 满仓：仓库满员，任何交付都会被拒；不要冲击 Core，
+                # 在 Core 附近待机等待空间开放（或敌人逼近时规避）。
+                # 距离 1 的 worker 先尝试通过外撤逃离密封环（若环上的
+                # 邻格都已 2 人占满，任何向内移动都会失败），否则留在
+                # 原地等待；更远的 worker 留在原地，避免无谓拥堵核心环。
+                if _distance(worker.position, core.position) == 1:
+                    moved = _queue_move(
+                        worker,
+                        _ring_escape_directions(
+                            worker.position,
+                            core.position,
+                            context,
+                        ),
+                        context,
+                        allow_single_friendly_transit=True,
+                    )
+                    if not moved:
+                        worker.wait()
+                    self._set_worker_mode(
+                        worker,
+                        "RING_HOLD" if moved else "RETURN_BLOCKED",
+                        core.position,
+                    )
+                else:
+                    # 距离 >= 2：留在原地待机。若自身处于 2 人共站格，
+                    # 尝试向外退出半步，为更近的承运者留出通道。
+                    if context.friendly_counts[worker.position] >= 2:
+                        moved = _queue_move(
+                            worker,
+                            _exploration_directions(worker),
+                            context,
+                            allow_single_friendly_transit=True,
+                        )
+                        if moved:
+                            self._set_worker_mode(
+                                worker,
+                                "RING_HOLD",
+                                core.position,
+                            )
+                            continue
+                    worker.wait()
+                    self._set_worker_mode(worker, "STOCKPILE_HOLD", core.position)
                 continue
             moved = _queue_toward(
                 worker,

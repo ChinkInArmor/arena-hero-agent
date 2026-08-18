@@ -3815,6 +3815,64 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(queued["unit_actions"][WORKER_1]["type"], "MOVE")
         self.assertEqual(queued["core_action"]["type"], "SPAWN")
 
+    def test_sealed_ring_full_stock_clears_core_and_keeps_workers_holding(
+        self,
+    ) -> None:
+        """Full-stock + a sealed 2-deep delivery ring must not deadlock.
+
+        Regression for the production outage: 12 loaded carriers packed
+        2-per-cell on the Core ring (no open neighbor) plus one carrier on
+        the Core.  The old code could neither deposit (full stock) nor
+        clear the Core (no open neighbor), so can_spawn stayed False and
+        the stock never drained -> permanent RETURN_BLOCKED.  Now the Core
+        carrier escapes outward to a distance-2 cell, freeing the Core for
+        a spawn that spends the surplus.
+        """
+        ring = [
+            unit(WORKER_2, "WORKER", (0, 1), cargo=1),  # (0,1)
+            unit(WORKER_3, "WORKER", (0, 1), cargo=1),  # 2 on (0,1)
+            unit(WORKER_4, "WORKER", (0, -1), cargo=1),  # (0,-1)
+            unit(WORKER_5, "WORKER", (0, -1), cargo=1),  # 2 on (0,-1)
+            unit(WORKER_6, "WORKER", (-1, 0), cargo=1),  # (-1,0)
+            unit(WORKER_7, "WORKER", (-1, 0), cargo=1),  # 2 on (-1,0)
+            unit(WORKER_8, "WORKER", (1, 0), cargo=1),  # (1,0)
+            unit(WORKER_9, "WORKER", (1, 0), cargo=1),  # 2 on (1,0)
+            unit(WORKER_10, "WORKER", (2, 2), cargo=1),  # distance 2
+            unit(WORKER_11, "WORKER", (2, -2), cargo=1),
+            unit(WORKER_12, "WORKER", (-2, 2), cargo=1),
+        ]
+        # one loaded carrier parked on the Core (0,0)
+        units = [unit(WORKER_1, "WORKER", (0, 0), cargo=1)] + ring
+        # 12 units -> capacity 60; stock 60 -> full storage
+        tactic = CoreFarmer(beacon_policy="hold")
+        turn = make_turn(tick=100, resources=60, units=units)
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+        # The Core carrier must vacate so the Core frees for a deposit/spawn
+        self.assertEqual(
+            queued["unit_actions"][WORKER_1]["type"],
+            "MOVE",
+            msg=f"Core carrier must MOVE out of the sealed ring; got {queued['unit_actions'].get(WORKER_1)}",
+        )
+        # Ring carriers do not storm the Core: none of them may be
+        # RETURN_BLOCKED / CLEAR_CORE_BLOCKED (moving / evading / step-aside
+        # are all fine; WAIT is not a retry storm).
+        blocked = [
+            mode
+            for mode in tactic.worker_modes.values()
+            if mode in {"RETURN_BLOCKED", "CLEAR_CORE_BLOCKED"}
+        ]
+        self.assertEqual(
+            blocked,
+            [],
+            msg=f"sealed ring must not deadlock carriers; got {blocked[:6]}",
+        )
+        self.assertIn(
+            tactic.worker_modes[UUID(WORKER_1)],
+            {"CLEAR_CORE", "CLEAR_CORE_HANDOFF", "DELIVERY_CHAIN_CARGO"},
+            msg=f"Core carrier must be clearing the Core; got {tactic.worker_modes.get(UUID(WORKER_1))}",
+        )
+
     def test_farmer_keeps_five_resource_reserve_before_spawning(self) -> None:
         queued = plan(
             make_turn(
