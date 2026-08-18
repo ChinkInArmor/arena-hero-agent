@@ -43,3 +43,6 @@ Thumbs.db
 # Local research and accidental artifacts
 /.tmp-*
 /0.2.4
+
+# Brainstorm session transcripts (local, not repo content)
+/brainstorms/
