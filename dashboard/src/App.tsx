@@ -342,16 +342,16 @@ function App() {
             {chartData.length ? (
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData} margin={{ top: 12, right: 14, left: -14, bottom: 4 }}>
-                  <CartesianGrid stroke="#273038" strokeDasharray="2 4" vertical={false} />
-                  <XAxis dataKey="time" tick={{ fill: "#85919a", fontSize: 11 }} minTickGap={36} axisLine={false} tickLine={false} />
-                  <YAxis yAxisId="economy" tick={{ fill: "#85919a", fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis yAxisId="units" orientation="right" tick={{ fill: "#85919a", fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip contentStyle={{ background: "#171d21", border: "1px solid #354048", borderRadius: 6 }} labelStyle={{ color: "#dce3e7" }} />
-                  <Legend iconType="plainline" wrapperStyle={{ fontSize: 12 }} />
-                  <Line yAxisId="economy" type="monotone" dataKey="resources" name="资源" stroke="#56b884" dot={false} strokeWidth={2} />
-                  <Line yAxisId="economy" type="monotone" dataKey="capacity" name="容量" stroke="#668fbe" dot={false} strokeWidth={1.5} />
-                  <Line yAxisId="units" type="monotone" dataKey="population" name="人口" stroke="#e4ad5e" dot={false} strokeWidth={2} />
-                  <Line yAxisId="units" type="monotone" dataKey="blocked" name="阻塞" stroke="#da6f68" dot={false} strokeWidth={1.5} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.06)" strokeDasharray="2 4" vertical={false} />
+                  <XAxis dataKey="time" tick={{ fill: "#71717a", fontSize: 11 }} minTickGap={36} axisLine={false} tickLine={false} />
+                  <YAxis yAxisId="economy" tick={{ fill: "#71717a", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <YAxis yAxisId="units" orientation="right" tick={{ fill: "#71717a", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.34)" }} labelStyle={{ color: "#d4d4d8" }} />
+                  <Legend iconType="plainline" wrapperStyle={{ fontSize: 12, color: "#71717a" }} />
+                  <Line yAxisId="economy" type="monotone" dataKey="resources" name="资源" stroke="#76b889" dot={false} strokeWidth={2} />
+                  <Line yAxisId="economy" type="monotone" dataKey="capacity" name="容量" stroke="#4591c5" dot={false} strokeWidth={1.5} />
+                  <Line yAxisId="units" type="monotone" dataKey="population" name="人口" stroke="#e1b64e" dot={false} strokeWidth={2} />
+                  <Line yAxisId="units" type="monotone" dataKey="blocked" name="阻塞" stroke="#c66370" dot={false} strokeWidth={1.5} />
                 </LineChart>
               </ResponsiveContainer>
             ) : <div className="empty-state"><Activity size={24} /><span>等待趋势数据</span></div>}

@@ -170,16 +170,16 @@ function TacticalMap({ state, selected, onSelect, onTarget }: {
     if (!ctx) return;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, rect.width, rect.height);
-    ctx.fillStyle = "#0d1215";
+    ctx.fillStyle = "#050607";
     ctx.fillRect(0, 0, rect.width, rect.height);
     const step = cellSize * scale;
-    ctx.strokeStyle = "#1b252b";
+    ctx.strokeStyle = "rgba(255,255,255,0.045)";
     ctx.lineWidth = 1;
     for (let x = offset.x % step; x < rect.width; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); ctx.stroke(); }
     for (let y = offset.y % step; y < rect.height; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(rect.width, y); ctx.stroke(); }
     const point = (x: number, y: number) => ({ x: offset.x + x * step, y: offset.y + y * step });
     if (layers.has("routes")) {
-      ctx.strokeStyle = "rgba(102,143,190,.75)";
+      ctx.strokeStyle = "rgba(139,183,212,0.6)";
       ctx.setLineDash([5, 4]);
       state.active_commands.forEach((order) => {
         const unit = order.unit_id ? state.units.find((item) => item.id === order.unit_id) : core;
@@ -194,18 +194,18 @@ function TacticalMap({ state, selected, onSelect, onTarget }: {
       if (item.kind === "OBSTACLE" && !layers.has("obstacles")) return;
       if (item.kind.startsWith("ENEMY") && !layers.has("enemies")) return;
       const p = point(item.x, item.y);
-      if (item.kind === "OBSTACLE") { ctx.fillStyle = "#465159"; ctx.fillRect(p.x - step * .42, p.y - step * .42, step * .84, step * .84); return; }
+      if (item.kind === "OBSTACLE") { ctx.fillStyle = "#2a2a2e"; ctx.fillRect(p.x - step * .42, p.y - step * .42, step * .84, step * .84); return; }
       ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(4, step * .3), 0, Math.PI * 2);
-      ctx.fillStyle = item.kind === "CORE" ? "#e8edf0" : item.kind === "BEACON" ? "#e4ad5e" : item.kind === "RESOURCE" ? "#56b884" : "#da6f68";
+      ctx.fillStyle = item.kind === "CORE" ? "#f4f4f5" : item.kind === "BEACON" ? "#d9a62e" : item.kind === "RESOURCE" ? "#76b889" : "#c66370";
       ctx.fill();
-      if (item.kind === "CORE" || item.kind === "ENEMY_CORE") { ctx.strokeStyle = item.kind === "CORE" ? "#56b884" : "#ff8b82"; ctx.lineWidth = 3; ctx.stroke(); }
+      if (item.kind === "CORE" || item.kind === "ENEMY_CORE") { ctx.strokeStyle = item.kind === "CORE" ? "#76b889" : "#ef9da8"; ctx.lineWidth = 3; ctx.stroke(); }
     });
     state.units.forEach((unit) => {
       const p = point(unit.x, unit.y), radius = Math.max(5, step * .28);
       ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
       ctx.fillStyle = unitColors[unit.unit_type]; ctx.fill();
       if (selected.has(unit.id)) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke(); }
-      ctx.fillStyle = "#0d1215"; ctx.font = `${Math.max(8, step * .28)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillStyle = "#050607"; ctx.font = `${Math.max(8, step * .28)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(unit.unit_type[0], p.x, p.y);
     });
   }, [state, selected, scale, offset, layers, core, drawVersion]);
@@ -330,8 +330,8 @@ export default function TacticalConsole({ active = true }: { active?: boolean })
     const value=await requestJson<{items:TacticalState[]}>("/api/v1/tactical/history?limit=240");
     setHistory(value.items.reverse()); setHistoryIndex(Math.max(0,value.items.length-1)); setLive(false);
   }
-  if (!view) return <div className="tactical-loading">等待私有战术状态</div>;
-  return <div className="tactical-console">
+  if (!view) return <div className="tactical-loading" hidden={!active} style={{display: active ? undefined : "none"}}>等待私有战术状态</div>;
+  return <div className="tactical-console" hidden={!active} style={{display: active ? undefined : "none"}}>
     <div className="tactical-toolbar">
       <div className="mode-cluster"><span className={`control-mode mode-${view.control_mode.toLowerCase()}`}>{view.control_mode}</span><b>Tick {view.tick.toLocaleString()}</b>{view.emergency_reason && <em><ShieldAlert size={14}/>{view.emergency_reason}</em>}</div>
       <div className="replay-controls">
