@@ -108,6 +108,28 @@ class TacticalUnit(StrictModel):
     mode: ControlMode
     target_x: int | None = None
     target_y: int | None = None
+    behavior: str | None = Field(default=None, max_length=32)
+
+
+class TacticalMemoryObject(StrictModel):
+    """A remembered map entry: position plus the tick it was last seen.
+
+    Static terrain (obstacles) is stored permanently; dynamic entries
+    (enemies, resources) decay and are pruned by the controller. The
+    front end derives confidence from ``tick - last_seen_tick``.
+    """
+
+    key: str = Field(max_length=64)
+    x: int
+    y: int
+    last_seen_tick: int = Field(ge=0)
+    unit_type: str | None = Field(default=None, max_length=16)
+
+
+class TacticalMemory(StrictModel):
+    obstacles: list[list[int]] = Field(default_factory=list)  # [x, y] pairs
+    resources: list[TacticalMemoryObject] = Field(default_factory=list)
+    enemies: list[TacticalMemoryObject] = Field(default_factory=list)
 
 
 class TacticalObject(StrictModel):
@@ -132,6 +154,7 @@ class TacticalSnapshot(StrictModel):
     objects: list[TacticalObject]
     active_commands: list[dict[str, Any]]
     expeditions: list[dict[str, Any]]
+    memory: TacticalMemory | None = None
 
 
 @dataclass(slots=True)
@@ -180,6 +203,11 @@ def enqueue_command(inbox: Path, command: TacticalCommand) -> Path:
 
 
 class TacticalController:
+    # Memory (persistent known map) retention in ticks.
+    MEMORY_RESOURCE_TTL = 256
+    MEMORY_ENEMY_TTL = 96
+    MEMORY_OBSTACLE_CAP = 20000
+
     def __init__(self, root: Path) -> None:
         self.root = root
         self.inbox = root / "commands"
@@ -192,6 +220,8 @@ class TacticalController:
         self.production_weights_override: dict[str, int] | None = None
         self._processed: set[str] = set()
         self._last_history_prune = datetime.min.replace(tzinfo=UTC)
+        self._memory: dict[tuple[str, str], TacticalMemoryObject] = {}
+        self._memory_tick = 0
         self.root.mkdir(parents=True, exist_ok=True)
         self.inbox.mkdir(parents=True, exist_ok=True)
         self.receipts.mkdir(parents=True, exist_ok=True)
@@ -442,6 +472,59 @@ class TacticalController:
             return "EXPEDITION"
         return "AUTO"
 
+    def _remember(self, turn: object) -> None:
+        """Merge visible terrain into the persistent known map.
+
+        Obstacles are static and kept forever (bounded by a cap);
+        resources and enemies carry last_seen_tick so the front end can
+        render confidence (= f(tick - last_seen_tick)) and the controller
+        can prune stale entries.
+        """
+        tick = turn.tick
+        self._memory_tick = tick
+        for x, y in turn.obstacle_cells:
+            self._memory[("obstacle", f"{x},{y}")] = TacticalMemoryObject(
+                key=f"{x},{y}", x=x, y=y, last_seen_tick=tick
+            )
+        for x, y in turn.resource_cells:
+            key = f"{x},{y}"
+            self._memory[("resource", key)] = TacticalMemoryObject(
+                key=key, x=x, y=y, last_seen_tick=tick
+            )
+        for enemy in turn.visible_enemies:
+            key = str(getattr(enemy, "id", "")) or f"{enemy.position[0]},{enemy.position[1]}"
+            self._memory[("enemy", key)] = TacticalMemoryObject(
+                key=key,
+                x=enemy.position[0],
+                y=enemy.position[1],
+                last_seen_tick=tick,
+                unit_type=getattr(getattr(enemy, "unit_type", None), "value", None),
+            )
+        # Prune dynamic entries past their TTL; bound static obstacle count.
+        for (kind, key), entry in tuple(self._memory.items()):
+            age = tick - entry.last_seen_tick
+            if kind == "obstacle":
+                if len(self._memory) <= self.MEMORY_OBSTACLE_CAP + 512:
+                    continue
+                self._memory.pop((kind, key), None)  # evict oldest-seen first
+            elif kind == "resource" and age > self.MEMORY_RESOURCE_TTL:
+                self._memory.pop((kind, key), None)
+            elif kind == "enemy" and age > self.MEMORY_ENEMY_TTL:
+                self._memory.pop((kind, key), None)
+
+    def _memory_snapshot(self) -> TacticalMemory:
+        obstacles = []
+        resources = []
+        enemies = []
+        for (kind, _), entry in self._memory.items():
+            target = {"obstacle": obstacles, "resource": resources, "enemy": enemies}[kind]
+            target.append(entry)
+        return TacticalMemory(
+            obstacles=sorted(([e.x, e.y] for e in obstacles), key=lambda pair: (pair[1], pair[0])),
+            resources=sorted(resources, key=lambda e: (e.y, e.x)),
+            enemies=sorted(enemies, key=lambda e: (e.y, e.x)),
+        )
+
     def write_snapshot(
         self,
         turn: object,
@@ -466,6 +549,7 @@ class TacticalController:
                     mode=order.mode if order else "AUTO",
                     target_x=order.target[0] if order else None,
                     target_y=order.target[1] if order else None,
+                    behavior=unit_modes.get(unit.id),
                 )
             )
         objects: list[TacticalObject] = []
@@ -476,6 +560,7 @@ class TacticalController:
         objects.extend(TacticalObject(kind="RESOURCE", x=x, y=y, last_seen_tick=turn.tick) for x, y in turn.resource_cells)
         objects.extend(TacticalObject(kind="OBSTACLE", x=x, y=y, last_seen_tick=turn.tick) for x, y in turn.obstacle_cells)
         objects.append(TacticalObject(kind="BEACON", id=getattr(turn.beacon, "carrier_id", None), x=turn.beacon.position[0], y=turn.beacon.position[1], last_seen_tick=turn.tick))
+        self._remember(turn)
         snapshot = TacticalSnapshot(
             generated_at=_timestamp(),
             tick=turn.tick,
@@ -497,9 +582,12 @@ class TacticalController:
                 for order in self.active_orders.values()
             ],
             expeditions=list(self.expeditions.values()),
+            memory=self._memory_snapshot(),
         )
         _atomic_json(self.snapshot_path, snapshot)
-        _atomic_json(self.history / f"tick-{turn.tick:020d}.json", snapshot)
+        history_payload = snapshot.model_dump(mode="json")
+        history_payload.pop("memory", None)
+        _atomic_json(self.history / f"tick-{turn.tick:020d}.json", history_payload)
         self._prune_history()
 
     def _prune_history(self) -> None:

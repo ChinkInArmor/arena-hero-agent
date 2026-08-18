@@ -235,6 +235,7 @@ function App() {
   const [range, setRange] = useState<(typeof ranges)[number]>("24h");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [jumpTick, setJumpTick] = useState<number | null>(null);
 
   const loadOverview = useCallback(async () => {
     try {
@@ -313,7 +314,7 @@ function App() {
         </div>
       </header>
 
-      <TacticalConsole active={view === "tactical"} />
+      <TacticalConsole active={view === "tactical"} jumpToTick={jumpTick ?? undefined} onJumpHandled={() => setJumpTick(null)} />
       <div style={{ display: view === "tactical" ? "none" : "contents" }}>
       {status !== "healthy" && (
         <div className={`notice notice-${status}`}>
@@ -358,11 +359,11 @@ function App() {
           </div>
 
           <div className="section-heading events-heading">
-            <div><h2>事件流</h2><span>已脱敏 · 最近 {events.length} 条</span></div>
+            <div><h2>事件流</h2><span>已脱敏 · 最近 {events.length} 条 · 点击战斗事件可跳转回放</span></div>
           </div>
           <div className="event-table" role="table" aria-label="脱敏事件">
             {events.length ? events.map((event) => (
-              <div className="event-row" role="row" key={event.event_id}>
+              <div className="event-row" role="row" key={event.event_id} onClick={() => { setJumpTick(event.tick); setView("tactical"); }}>
                 <span className={`event-category category-${event.category.toLowerCase()}`}>{categoryNames[event.category] ?? event.category}</span>
                 <div className="event-name"><b>{event.event_type}</b><span>{event.reason_code ?? "成功"}</span></div>
                 <div className="event-values">{Object.entries(event.values).map(([key, value]) => <span key={key}>{key} {value}</span>)}</div>

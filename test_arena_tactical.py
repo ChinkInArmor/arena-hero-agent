@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from arena_tactical import TacticalCommand, TacticalController, TacticalSnapshot, enqueue_command
-from test_arena_farmer import CORE_ID, RANGER_1, VANGUARD_1, WORKER_1, make_turn, unit
+from test_arena_farmer import CORE_ID, ENEMY_1, RANGER_1, VANGUARD_1, WORKER_1, make_turn, unit
 
 
 def command(kind: str, **overrides: object) -> TacticalCommand:
@@ -156,6 +156,63 @@ class TacticalControllerTests(unittest.TestCase):
             self.assertEqual((snapshot.units[0].x, snapshot.units[0].y), (6, 5))
             self.assertEqual({item.kind for item in snapshot.objects}, {"CORE", "RESOURCE", "OBSTACLE", "BEACON"})
             self.assertTrue((controller.history / "tick-00000000000000000120.json").exists())
+
+    def test_snapshot_behavior_and_memory_layers(self) -> None:
+        """worker behavior passes through; memory persists obstacles,
+        tracks resource/enemy last_seen_tick, and prunes stale entries.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            controller = TacticalController(Path(directory))
+            first = make_turn(
+                tick=200,
+                core_position=(0, 0),
+                units=[unit(WORKER_1, "WORKER", (1, 1), cargo=0)],
+                resource_cells=[(3, 3)],
+                obstacles=[(-5, -5)],
+                enemies=[unit(ENEMY_1, "RANGER", (-2, -2), controlled=False)],
+            )
+            controller.write_snapshot(
+                first, emergency_reason=None, unit_modes={UUID(WORKER_1): "RETURN_BLOCKED"}
+            )
+            snapshot = TacticalSnapshot.model_validate_json(
+                controller.snapshot_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(snapshot.units[0].behavior, "RETURN_BLOCKED")
+            self.assertIsNotNone(snapshot.memory)
+            assert snapshot.memory is not None
+            self.assertIn([-5, -5], snapshot.memory.obstacles)
+            self.assertEqual(
+                [(entry.x, entry.y, entry.last_seen_tick) for entry in snapshot.memory.resources],
+                [(3, 3, 200)],
+            )
+            self.assertEqual(
+                [(entry.x, entry.y, entry.unit_type) for entry in snapshot.memory.enemies],
+                [(-2, -2, "RANGER")],
+            )
+            # history files are payload-only and omit the memory layer
+            history_tick = controller.history / "tick-00000000000000000200.json"
+            history_payload = json.loads(history_tick.read_text(encoding="utf-8"))
+            self.assertNotIn("memory", history_payload)
+            self.assertTrue(history_payload["units"][0]["behavior"] == "RETURN_BLOCKED")
+
+            # a stale enemy expires after MEMORY_ENEMY_TTL ticks; a static
+            # obstacle never expires; a refreshed resource resets its TTL.
+            later = make_turn(
+                tick=200 + controller.MEMORY_ENEMY_TTL + 10,
+                core_position=(0, 0),
+                units=[unit(WORKER_1, "WORKER", (1, 1))],
+                obstacles=[(-6, -6), (-5, -5)],
+                resource_cells=[(3, 3)],
+            )
+            controller.write_snapshot(later, emergency_reason=None, unit_modes={})
+            refreshed = TacticalSnapshot.model_validate_json(
+                controller.snapshot_path.read_text(encoding="utf-8")
+            )
+            assert refreshed.memory is not None
+            self.assertIn([-5, -5], refreshed.memory.obstacles)
+            self.assertIn([-6, -6], refreshed.memory.obstacles)
+            self.assertEqual(refreshed.memory.enemies, [])
+            self.assertEqual(refreshed.memory.resources[0].last_seen_tick, 200 + controller.MEMORY_ENEMY_TTL + 10)
 
 
 if __name__ == "__main__":
