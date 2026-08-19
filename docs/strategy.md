@@ -7,16 +7,17 @@ objective.
 
 ## Population Plan
 
-Production has a validated baseline and evidence-driven strategic growth:
+Production has a validated baseline and evidence-driven strategic growth. The
+numbers below are policy targets, not game-rule population caps:
 
 | Layer | Profile | Policy |
 | --- | --- | --- |
 | Baseline | `12 Worker + 3 Vanguard + 4 Ranger = 19` | Preserve the validated collection and defense envelope. |
-| Conservative growth | Up to 24 population | Retain the prior local profile while evidence is weak. |
-| Territorial growth | Bounded local limit up to 30 | Open only after saturated storage or a productive, low-congestion economic window. |
-| Control force | Bounded local limit up to 40 | Mobilize toward 18 Workers, 10 Vanguards, and 12 Rangers when a visible enemy Core provides authoritative pressure evidence. |
-| Overwhelm force | Validated adviser limit up to 48 | Permit at most 18 Workers, 14 Vanguards, and 16 Rangers when model advice passes the complete schema and local safety override. |
-| Emergency defense | At least the legacy population-25 slot | Permit a measured defender after safe evasion cannot be started. |
+| Consolidation | Production ceiling 24 | Hold the baseline profile while evidence is weak. Full storage alone does not open growth. |
+| Economic growth | Dynamic economic target | Open only after a complete 32-Tick window shows productive, low-congestion deposits and at least two known resources. |
+| Military pressure | Separate military target | Increase military requirements only for authoritative visible enemy-Core pressure; do not replace the economic target. |
+| Overextended | Committed population above local ceiling | Freeze discretionary production. Do not automatically self-destruct Units. |
+| Emergency defense | Independent bounded authorization | Permit a measured defender when direct Core risk requires it, regardless of discretionary production state. |
 
 The Agent calls the official SDK `unit_cost(unit_type, turn.state.population)`
 for every production and reserve comparison. Optional production scores Worker,
@@ -28,7 +29,9 @@ state and matching spawn event must confirm the expected Unit type.
 
 Explicitly smaller Worker profiles still disable optional growth. The default
 profile can remain at 19 or 24 when deposits, congestion, recovery, threat, or
-compatibility uncertainty do not justify another purchase. The local planner
+compatibility uncertainty do not justify another purchase. A current 40-population
+fleet is treated as committed population and can be `OVEREXTENDED`; the local
+planner freezes optional production without reclaiming Units. The local planner
 never intentionally self-destructs Units to force a composition change.
 
 ## Core Safety

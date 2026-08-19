@@ -14,7 +14,7 @@ from typing import Any
 
 from arena_strategy import force_stage
 
-OBSERVATION_SCHEMA_VERSION = 2
+OBSERVATION_SCHEMA_VERSION = 4
 DEFAULT_OBSERVATION_DIR = Path("/var/lib/arena-hero-observability/inbox")
 EVENT_RETENTION_DAYS = 8
 SAFE_EVENT_VALUES = {
@@ -180,10 +180,19 @@ def build_observation(turn: object, tactic: object, accepted_tick: int) -> dict[
             "source": parameters.source,
             "reason": _strategy_reason(parameters.source, context),
             "valid_until_tick": parameters.valid_until_tick,
+            "state": parameters.state.value,
+            "population_health": parameters.population_health.value,
+            "beacon_mode": parameters.beacon_mode.value,
+            "state_entered_tick": parameters.state_entered_tick,
+            "state_dwell_ticks": parameters.state_dwell_ticks,
             "worker_target": parameters.worker_target,
             "vanguard_target": parameters.vanguard_target,
             "ranger_target": parameters.ranger_target,
-            "population_limit": parameters.population_limit,
+            "economic_target": parameters.economic_target,
+            "military_target": parameters.military_target,
+            "committed_population": parameters.committed_population,
+            "production_ceiling": parameters.production_ceiling,
+            "population_limit": parameters.production_ceiling,
             "economy_weight": parameters.economy_weight,
             "territory_weight": parameters.territory_weight,
             "combat_weight": parameters.combat_weight,
@@ -199,12 +208,48 @@ def build_observation(turn: object, tactic: object, accepted_tick: int) -> dict[
             "force_worker_deficit": formation["worker_deficit"],
             "force_vanguard_deficit": formation["vanguard_deficit"],
             "force_ranger_deficit": formation["ranger_deficit"],
+            "migration_shadow": _migration_shadow(tactic),
         },
         "adviser": adviser_status,
         "actions": _safe_count_map(action_counts),
         "event_counts": _safe_count_map(event_counts),
         "worker_modes": _safe_count_map(mode_counts),
         "events": safe_events,
+    }
+
+
+def _migration_shadow(tactic: object) -> dict[str, object]:
+    shadow = getattr(tactic, "last_shadow_migration", None)
+    if shadow is None:
+        return {
+            "enabled": False,
+            "evaluated": False,
+            "status": "NOT_EVALUATED",
+            "reason": "not_evaluated",
+            "candidate_count": 0,
+            "reserve_sufficient": False,
+            "escort_sufficient": False,
+            "cargo_safe": False,
+            "abort_available": False,
+            "restricted_ticks_per_cell": 4,
+            "score": 0,
+            "authoritative_rechecks": 0,
+        }
+    blockers = tuple(getattr(shadow, "blockers", ()))
+    eligible = bool(getattr(shadow, "eligible", False))
+    return {
+        "enabled": True,
+        "evaluated": True,
+        "status": "READY" if eligible else "BLOCKED",
+        "reason": blockers[0].lower() if blockers else "ready_for_review",
+        "candidate_count": int(getattr(shadow, "candidate_count", 0)),
+        "reserve_sufficient": bool(getattr(shadow, "reserve_sufficient", False)),
+        "escort_sufficient": bool(getattr(shadow, "escort_sufficient", False)),
+        "cargo_safe": bool(getattr(shadow, "cargo_safe", False)),
+        "abort_available": bool(getattr(shadow, "abort_available", False)),
+        "restricted_ticks_per_cell": 4,
+        "score": int(getattr(shadow, "score", 0)),
+        "authoritative_rechecks": int(getattr(shadow, "authoritative_rechecks", 0)),
     }
 
 
@@ -216,9 +261,9 @@ def _strategy_reason(source: str, context: object | None) -> str:
     if source == "local-contest":
         return "beacon_contest_enabled"
     if source == "local-expand":
-        if context is not None and getattr(context, "storage_saturated", False):
-            return "storage_saturated"
         return "sustained_economic_evidence"
+    if source == "local-overextended":
+        return "committed_population_exceeds_production_ceiling"
     if source == "model" or source.startswith("model:"):
         return "validated_model_advice"
     return "deterministic_baseline"

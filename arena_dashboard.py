@@ -86,16 +86,41 @@ class BattlefieldState(StrictModel):
     combat_patrol_units: int = Field(ge=0)
 
 
+class MigrationShadowState(StrictModel):
+    enabled: bool = False
+    evaluated: bool = False
+    status: Literal["NOT_EVALUATED", "BLOCKED", "READY"] = "NOT_EVALUATED"
+    reason: str = Field(default="not_evaluated", max_length=80)
+    candidate_count: int = Field(default=0, ge=0, le=4)
+    reserve_sufficient: bool = False
+    escort_sufficient: bool = False
+    cargo_safe: bool = False
+    abort_available: bool = False
+    restricted_ticks_per_cell: int = Field(default=4, ge=4, le=4)
+    score: int = Field(default=0, ge=-10000, le=10000)
+    authoritative_rechecks: int = Field(default=0, ge=0)
+
+
 class StrategyState(StrictModel):
     phase: str = Field(max_length=40)
     posture: str = Field(max_length=24)
     source: str = Field(max_length=80)
     reason: str = Field(max_length=80)
     valid_until_tick: int = Field(ge=0)
+    state: str = Field(default="CONSOLIDATE", max_length=40)
+    population_health: str = Field(default="CONSOLIDATING", max_length=24)
+    beacon_mode: str = Field(default="DEFERRED", max_length=24)
+    state_entered_tick: int = Field(default=0, ge=0)
+    state_dwell_ticks: int = Field(default=0, ge=0)
     worker_target: int = Field(ge=0)
     vanguard_target: int = Field(ge=0)
     ranger_target: int = Field(ge=0)
+    economic_target: int = Field(default=0, ge=0)
+    military_target: int = Field(default=0, ge=0)
+    committed_population: int = Field(default=0, ge=0)
+    production_ceiling: int = Field(default=0, ge=0)
     population_limit: int = Field(ge=0)
+    migration_shadow: MigrationShadowState = Field(default_factory=MigrationShadowState)
     economy_weight: int = Field(ge=0, le=10)
     territory_weight: int = Field(ge=0, le=10)
     combat_weight: int = Field(ge=0, le=10)
@@ -140,7 +165,7 @@ class RedactedEvent(StrictModel):
 
 
 class Observation(StrictModel):
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3, 4]
     generated_at: datetime
     tick: int = Field(gt=0)
     agent: AgentState

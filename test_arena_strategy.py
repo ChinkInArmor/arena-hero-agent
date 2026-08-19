@@ -13,16 +13,19 @@ from arena_strategy import (
     AdviserConfig,
     AsyncStrategicAdviser,
     BASELINE_PARAMETERS,
+    beacon_priority_for_context,
     StrategicAdviceClient,
     StrategicContext,
     StrategicController,
     StrategicPosture,
+    StrategicState,
+    PopulationHealth,
     StrategyValidationError,
     force_stage,
     plan_local_strategy,
     resource_assignment_cost,
     select_marginal_unit,
-    validate_strategic_parameters,
+    validate_strategic_advice,
 )
 
 
@@ -46,6 +49,7 @@ def context(**overrides: object) -> StrategicContext:
         "threat_level": "NORMAL",
         "recovery": False,
         "compatibility_hold": False,
+        "economic_window_ticks": 32,
     }
     values.update(overrides)
     return StrategicContext(**values)  # type: ignore[arg-type]
@@ -54,10 +58,6 @@ def context(**overrides: object) -> StrategicContext:
 def candidate(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "posture": "EXPAND",
-        "worker_target": 16,
-        "vanguard_target": 5,
-        "ranger_target": 7,
-        "population_limit": 30,
         "economy_weight": 7,
         "territory_weight": 7,
         "combat_weight": 5,
@@ -71,43 +71,24 @@ def candidate(**overrides: object) -> dict[str, object]:
 
 
 class StrategicValidationTests(unittest.TestCase):
-    def test_valid_candidate_is_bounded_and_gets_absolute_expiry(self) -> None:
-        result = validate_strategic_parameters(candidate(), current_tick=900)
+    def test_valid_advice_is_bounded_and_gets_absolute_expiry(self) -> None:
+        result = validate_strategic_advice(candidate(), current_tick=900)
         self.assertEqual(result.posture, StrategicPosture.EXPAND)
         self.assertEqual(result.valid_until_tick, 1156)
         self.assertEqual(result.source, "model")
 
-    def test_unknown_fields_and_impossible_composition_are_rejected(self) -> None:
+    def test_unknown_fields_and_production_authority_are_rejected(self) -> None:
         with self.assertRaisesRegex(StrategyValidationError, "fields"):
-            validate_strategic_parameters(
+            validate_strategic_advice(
                 {**candidate(), "commands": ["ATTACK"]}, current_tick=1
             )
-        with self.assertRaisesRegex(StrategyValidationError, "targets_exceed"):
-            validate_strategic_parameters(
-                candidate(
-                    worker_target=18,
-                    vanguard_target=10,
-                    ranger_target=14,
-                    population_limit=40,
-                ),
-                current_tick=1,
+        with self.assertRaisesRegex(StrategyValidationError, "fields"):
+            validate_strategic_advice(
+                {**candidate(), "population_limit": 48}, current_tick=1
             )
-
-    def test_overwhelm_force_is_valid_but_population_49_is_rejected(self) -> None:
-        result = validate_strategic_parameters(
-            candidate(
-                worker_target=18,
-                vanguard_target=14,
-                ranger_target=16,
-                population_limit=48,
-            ),
-            current_tick=1,
-        )
-        self.assertEqual(result.population_limit, 48)
-        with self.assertRaisesRegex(StrategyValidationError, "population_limit"):
-            validate_strategic_parameters(
-                candidate(population_limit=49),
-                current_tick=1,
+        with self.assertRaisesRegex(StrategyValidationError, "fields"):
+            validate_strategic_advice(
+                {**candidate(), "worker_target": 18}, current_tick=1
             )
 
     def test_force_stage_reports_the_next_composition_deficits(self) -> None:
@@ -143,28 +124,50 @@ class StrategicValidationTests(unittest.TestCase):
 
 
 class LocalPlannerTests(unittest.TestCase):
-    def test_enemy_core_pressure_mobilizes_a_control_force(self) -> None:
+    def test_enemy_core_pressure_raises_only_the_military_target(self) -> None:
         result = plan_local_strategy(
             context(visible_enemy_cores=1, vanguards=4, rangers=5)
         )
         self.assertEqual(result.posture, StrategicPosture.PRESSURE)
-        self.assertEqual(result.population_limit, 40)
-        self.assertEqual(
-            (result.worker_target, result.vanguard_target, result.ranger_target),
-            (18, 10, 12),
-        )
+        self.assertEqual(result.economic_target, 24)
+        self.assertGreater(result.military_target, result.economic_target)
+        self.assertEqual(result.production_ceiling, result.military_target)
 
-    def test_no_evidence_preserves_legacy_bounded_profile(self) -> None:
+    def test_no_evidence_preserves_consolidating_profile(self) -> None:
         result = plan_local_strategy(context())
-        self.assertEqual(result.population_limit, 24)
+        self.assertEqual(result.production_ceiling, 24)
         self.assertEqual(result.worker_target, 17)
         self.assertEqual(result.source, "local")
 
-    def test_saturated_storage_opens_bounded_territorial_growth(self) -> None:
+    def test_saturated_storage_alone_does_not_open_growth(self) -> None:
         result = plan_local_strategy(context(resources=120))
+        self.assertEqual(result.posture, StrategicPosture.CONSOLIDATE)
+        self.assertEqual(result.production_ceiling, 24)
+
+    def test_sustained_throughput_opens_economic_growth(self) -> None:
+        result = plan_local_strategy(
+            context(deposits_window=20, blocked_ticks=0, known_resources=2)
+        )
         self.assertEqual(result.posture, StrategicPosture.EXPAND)
-        self.assertEqual(result.population_limit, 30)
+        self.assertGreater(result.economic_target, BASELINE_PARAMETERS.production_ceiling)
         self.assertGreater(result.territory_weight, BASELINE_PARAMETERS.territory_weight)
+
+    def test_population_40_is_overextended_and_freezes_discretionary_growth(self) -> None:
+        result = plan_local_strategy(
+            context(
+                resources=200,
+                resource_capacity=200,
+                population=40,
+                workers=18,
+                vanguards=10,
+                rangers=12,
+                known_resources=1,
+            )
+        )
+        self.assertEqual(result.state, StrategicState.OVEREXTENDED)
+        self.assertEqual(result.population_health, PopulationHealth.OVEREXTENDED)
+        self.assertLess(result.production_ceiling, 40)
+        self.assertNotEqual(result.production_ceiling, 48)
 
     def test_emergency_state_overrides_growth_evidence(self) -> None:
         result = plan_local_strategy(
@@ -172,6 +175,33 @@ class LocalPlannerTests(unittest.TestCase):
         )
         self.assertEqual(result.posture, StrategicPosture.CONSOLIDATE)
         self.assertEqual(result.source, "local-safety")
+
+    def test_beacon_value_accounts_for_distance_and_opportunity_cost(self) -> None:
+        self.assertEqual(
+            beacon_priority_for_context(
+                context(beacon_distance=20, beacon_contest_enabled=True)
+            ).value,
+            "PRIMARY",
+        )
+        self.assertEqual(
+            beacon_priority_for_context(
+                context(
+                    beacon_distance=20,
+                    beacon_contest_enabled=True,
+                    resources=20,
+                )
+            ).value,
+            "DEFERRED",
+        )
+        self.assertEqual(
+            beacon_priority_for_context(
+                context(
+                    beacon_distance=80,
+                    beacon_contest_enabled=True,
+                )
+            ).value,
+            "SECONDARY",
+        )
 
     def test_beacon_contest_requires_explicit_policy(self) -> None:
         held = plan_local_strategy(context(beacon_distance=20))
@@ -182,7 +212,9 @@ class LocalPlannerTests(unittest.TestCase):
         self.assertEqual(pursuing.posture, StrategicPosture.CONTEST)
 
     def test_marginal_selection_prices_deficits_and_utility(self) -> None:
-        expanding = plan_local_strategy(context(resources=120))
+        expanding = plan_local_strategy(
+            context(resources=120, deposits_window=20, known_resources=2)
+        )
         selected = select_marginal_unit(
             workers=17,
             vanguards=3,
@@ -265,11 +297,7 @@ class _FakeClient:
 class AdviceClientTests(unittest.TestCase):
     def test_openai_compatible_transport_accepts_local_endpoint_without_key(self) -> None:
         fake = _FakeClient(
-            {
-                "choices": [
-                    {"message": {"content": json.dumps(candidate())}}
-                ]
-            }
+            {"choices": [{"message": {"content": json.dumps(candidate())}}]}
         )
         with patch("arena_strategy.httpx.Client", return_value=fake) as factory:
             result = StrategicAdviceClient(
@@ -308,7 +336,7 @@ class AdviceClientTests(unittest.TestCase):
 class AsyncAdviserTests(unittest.TestCase):
     def test_advice_is_applied_then_expires(self) -> None:
         called = threading.Event()
-        advice = validate_strategic_parameters(candidate(ttl_ticks=128), current_tick=1000)
+        advice = validate_strategic_advice(candidate(ttl_ticks=128), current_tick=1000)
 
         def request(_context: StrategicContext, _local: object):
             called.set()
@@ -324,13 +352,14 @@ class AsyncAdviserTests(unittest.TestCase):
             controller.update(first_context)
             controller.observe_accepted(first_context)
             self.assertTrue(called.wait(1.0))
-            for _ in range(20):
+            for _ in range(50):
                 result = controller.update(context(tick=1001))
-                if result.source == "model":
+                if adviser.last_outcome == "applied":
+                    result = controller.update(context(tick=1001))
                     break
                 time.sleep(0.01)
             self.assertEqual(result.source, "model")
-            telemetry = adviser.telemetry(1001, "model:openai-compatible")
+            telemetry = adviser.telemetry(1001, "model")
             self.assertEqual(telemetry["requests"], 1)
             self.assertEqual(telemetry["applied"], 1)
             self.assertEqual(telemetry["failures"], 0)
@@ -362,7 +391,7 @@ class AsyncAdviserTests(unittest.TestCase):
                 if adviser.last_outcome.startswith("failed"):
                     break
                 time.sleep(0.01)
-            self.assertEqual(result.source, "local-expand")
+            self.assertNotEqual(result.source, "model")
             self.assertEqual(adviser.last_outcome, "failed:TimeoutError")
             telemetry = adviser.telemetry(first_context.tick, result.source)
             self.assertEqual(telemetry["requests"], 1)
@@ -371,7 +400,7 @@ class AsyncAdviserTests(unittest.TestCase):
             adviser.close()
 
     def test_emergency_ignores_live_model_advice(self) -> None:
-        advised = validate_strategic_parameters(candidate(), current_tick=1000)
+        advised = validate_strategic_advice(candidate(), current_tick=1000)
         adviser = AsyncStrategicAdviser(
             AdviserConfig("openai-compatible", "http://localhost:11434", "local"),
             requester=lambda _context, _local: advised,
@@ -388,6 +417,55 @@ class AsyncAdviserTests(unittest.TestCase):
                 time.sleep(0.01)
             emergency = controller.update(context(tick=1002, threat_level="BREAKOUT"))
             self.assertEqual(emergency.source, "local-safety")
+        finally:
+            adviser.close()
+
+    def test_model_advice_cannot_raise_the_local_production_ceiling(self) -> None:
+        advice = validate_strategic_advice(candidate(), current_tick=1000)
+        adviser = AsyncStrategicAdviser(
+            AdviserConfig("openai-compatible", "http://localhost:11434", "local"),
+            requester=lambda _context, _local: advice,
+        )
+        try:
+            controller = StrategicController(adviser)
+            initial = context(
+                population=40,
+                workers=18,
+                vanguards=10,
+                rangers=12,
+                resources=200,
+                resource_capacity=200,
+                known_resources=1,
+            )
+            controller.update(initial)
+            controller.observe_accepted(initial)
+            for _ in range(50):
+                result = controller.update(context(
+                    tick=1001,
+                    population=40,
+                    workers=18,
+                    vanguards=10,
+                    rangers=12,
+                    resources=200,
+                    resource_capacity=200,
+                    known_resources=1,
+                ))
+                if adviser.last_outcome == "applied":
+                    result = controller.update(context(
+                        tick=1001,
+                        population=40,
+                        workers=18,
+                        vanguards=10,
+                        rangers=12,
+                        resources=200,
+                        resource_capacity=200,
+                        known_resources=1,
+                    ))
+                    break
+                time.sleep(0.01)
+            self.assertEqual(result.source, "model")
+            self.assertEqual(result.production_ceiling, 24)
+            self.assertEqual(result.population_health, PopulationHealth.OVEREXTENDED)
         finally:
             adviser.close()
 

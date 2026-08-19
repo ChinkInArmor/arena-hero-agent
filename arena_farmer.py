@@ -10,7 +10,7 @@ import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from getpass import getpass
 from itertools import count
@@ -65,7 +65,7 @@ EARLY_DEFENSE_RESERVE = 15
 LONG_TERM_DEFENSE_RESERVE = 15
 BASELINE_VANGUARD_TARGET = 3
 BASELINE_RANGER_TARGET = 4
-ABSOLUTE_POPULATION_LIMIT = 25
+EMERGENCY_PRODUCTION_CEILING = 48
 EMERGENCY_VANGUARD_TARGET = 4
 EMERGENCY_RANGER_TARGET = 5
 GROWTH_WINDOW_TICKS = 32
@@ -356,6 +356,45 @@ class ProductionBudget:
     worker_cost: int
     vanguard_cost: int
     ranger_cost: int
+
+
+@dataclass(slots=True, frozen=True)
+class ShadowMigrationContext:
+    tick: int
+    core_position: Position
+    core_state: CoreState
+    strategic_state: str
+    beacon_position: Position
+    resources: int
+    resource_space: int
+    cargo_on_core: bool
+    cargo_waiting: bool
+    escort_sufficient: bool
+    compatibility_hold: bool
+    recovery_mode: bool
+    combat_pressure: bool
+    threat_level: ThreatLevel
+    enemies: tuple[object, ...]
+    obstacles: frozenset[Position]
+    blocked_cells: frozenset[Position]
+    danger_cells: frozenset[Position]
+    friendly_counts: Mapping[Position, int]
+
+
+@dataclass(slots=True, frozen=True)
+class ShadowMigrationEvaluation:
+    eligible: bool
+    recommendation: str
+    direction: Direction | None = None
+    destination: Position | None = None
+    score: int = 0
+    candidate_count: int = 0
+    reserve_sufficient: bool = False
+    escort_sufficient: bool = False
+    cargo_safe: bool = False
+    abort_available: bool = False
+    authoritative_rechecks: int = 0
+    blockers: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1413,6 +1452,104 @@ def _projected_core_damage(
     return damage
 
 
+def evaluate_shadow_migration(
+    context: ShadowMigrationContext,
+) -> ShadowMigrationEvaluation:
+    """Evaluate strategic relocation without creating or mutating an action."""
+    blockers: list[str] = []
+    if context.core_state is not CoreState.NORMAL:
+        blockers.append("CORE_NOT_NORMAL")
+    if context.strategic_state not in {"GROW_ECONOMY", "BEACON_CONTEST"}:
+        blockers.append("STRATEGIC_STATE")
+    if not context.escort_sufficient:
+        blockers.append("INSUFFICIENT_ESCORT")
+    if context.compatibility_hold:
+        blockers.append("COMPATIBILITY_HOLD")
+    if context.recovery_mode:
+        blockers.append("RECOVERY")
+    if context.combat_pressure or context.threat_level in {
+        ThreatLevel.PRE_EVADE,
+        ThreatLevel.ENGAGED,
+        ThreatLevel.BREAKOUT,
+    }:
+        blockers.append("TACTICAL_THREAT")
+    if context.cargo_on_core:
+        blockers.append("CARGO_ON_CORE")
+    if context.cargo_waiting:
+        blockers.append("CARGO_WAITING")
+    if context.resources < CORE_RESOURCE_RESERVE:
+        blockers.append("RESOURCE_RESERVE")
+    if blockers:
+        return ShadowMigrationEvaluation(
+            eligible=False,
+            recommendation="REJECT",
+            reserve_sufficient=context.resources >= CORE_RESOURCE_RESERVE,
+            escort_sufficient=context.escort_sufficient,
+            cargo_safe=not context.cargo_on_core and not context.cargo_waiting,
+            blockers=tuple(dict.fromkeys(blockers)),
+        )
+
+    candidates: list[tuple[tuple[int, int, int, int, int], Direction, Position]] = []
+    for order, direction in enumerate(CARDINAL_DIRECTIONS):
+        destination = _destination(context.core_position, direction)
+        if not _is_signed_int64_position(destination):
+            continue
+        if destination in context.blocked_cells:
+            continue
+        if context.friendly_counts.get(destination, 0) >= 2:
+            continue
+        projected_damage = _projected_core_damage(
+            destination, context.enemies, set(context.obstacles)
+        )
+        in_danger = int(destination in context.danger_cells)
+        nearest_enemy = min(
+            (_distance(destination, enemy.position) for enemy in context.enemies),
+            default=10_000,
+        )
+        # Beacon contest prefers progress toward the Beacon; economic growth
+        # prefers a stable direction with lower threat and deterministic ties.
+        beacon_distance = _distance(destination, context.beacon_position)
+        strategic_direction = (
+            beacon_distance
+            if context.strategic_state == "BEACON_CONTEST"
+            else -beacon_distance
+        )
+        candidates.append(
+            (
+                (projected_damage, in_danger, -nearest_enemy, strategic_direction, order),
+                direction,
+                destination,
+            )
+        )
+    if not candidates:
+        return ShadowMigrationEvaluation(
+            eligible=False,
+            recommendation="REJECT",
+            reserve_sufficient=True,
+            escort_sufficient=True,
+            cargo_safe=True,
+            blockers=("NO_LEGAL_ADJACENT_CELL",),
+        )
+    score_key, direction, destination = min(candidates, key=lambda item: item[0])
+    score = -(
+        score_key[0] * 100
+        + score_key[1] * 25
+        + max(0, 32 + score_key[2])
+    )
+    return ShadowMigrationEvaluation(
+        eligible=True,
+        recommendation="SHADOW_ONLY",
+        direction=direction,
+        destination=destination,
+        score=score,
+        candidate_count=len(candidates),
+        reserve_sufficient=True,
+        escort_sufficient=True,
+        cargo_safe=True,
+        abort_available=len(candidates) >= 2,
+    )
+
+
 def _core_threatening_enemies(
     core_position: Position,
     enemies: Sequence[object],
@@ -1639,6 +1776,13 @@ class CoreFarmer:
         self.last_core_cancel_reason = "NONE"
         self.last_projected_core_damage = 0
         self.last_core_survival_margin = 0
+        self.shadow_migration_rechecks = 0
+        self.last_shadow_migration = ShadowMigrationEvaluation(
+            eligible=False,
+            recommendation="NOT_EVALUATED",
+            authoritative_rechecks=0,
+            blockers=("NOT_EVALUATED",),
+        )
         self.enemy_core_sightings: dict[UUID, EnemyCoreSighting] = {}
         self.enemy_unit_sightings: dict[UUID, EnemyCoreSighting] = {}
         self.enemy_unit_motion: dict[UUID, EnemyUnitMotion] = {}
@@ -1830,11 +1974,7 @@ class CoreFarmer:
             for tick, blocked in self.economic_blocked_history
             if tick >= window_start
         )
-        # A fully saturated stock skips the earnback/blocking window: any
-        # death then shrinks capacity and overflows the Core. Growth spends
-        # that dead margin before it can cascade.
-        storage_saturated = turn.resource_space == 0
-        return storage_saturated or (
+        return (
             deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
             and blocked_ticks == 0
         )
@@ -1876,6 +2016,7 @@ class CoreFarmer:
             threat_level=self.threat_assessment.level.value,
             recovery=self.recovery_mode,
             compatibility_hold=self.compatibility_hold,
+            economic_window_ticks=len(self.economic_blocked_history),
         )
         self._strategic_context = context
         self.strategic_parameters = self.strategic_controller.update(context)
@@ -1897,7 +2038,7 @@ class CoreFarmer:
         """Allow a bounded emergency spawn only when one loss can unlock it."""
         if self.pending_conditional_spawn or turn.tick < self.conditional_spawn_retry_until_tick:
             return False
-        if budget.population <= 0 or budget.population >= ABSOLUTE_POPULATION_LIMIT:
+        if budget.population <= 0 or budget.population >= EMERGENCY_PRODUCTION_CEILING:
             return False
         current_cost = unit_cost(unit_type, budget.population)
         lower_cost = unit_cost(unit_type, budget.population - 1)
@@ -2909,6 +3050,12 @@ class CoreFarmer:
 
     def _update_core_movement_history(self, turn: Turn) -> None:
         for event in turn.events:
+            if event.event_type in {
+                "CORE_MOVE_SUCCEEDED",
+                "CORE_MOVE_FAILED",
+                "CORE_MOVE_CANCELLED",
+            }:
+                self.shadow_migration_rechecks += 1
             if event.event_type == "CORE_MOVE_SUCCEEDED":
                 self.last_core_move_tick = turn.tick
                 self.active_core_move_reason = None
@@ -3503,6 +3650,39 @@ class CoreFarmer:
             preplanned_units=set(),
         )
         context.delivery_lane = _select_delivery_lane(context)
+        self.last_shadow_migration = evaluate_shadow_migration(
+            ShadowMigrationContext(
+                tick=turn.tick,
+                core_position=core.position,
+                core_state=core.view.state,
+                strategic_state=self.strategic_parameters.state.value,
+                beacon_position=turn.beacon.position,
+                resources=turn.resources,
+                resource_space=turn.resource_space,
+                cargo_on_core=any(
+                    worker.cargo > 0 and worker.position == core.position
+                    for worker in turn.workers
+                ),
+                cargo_waiting=self._should_wait_for_cargo(turn, context),
+                escort_sufficient=(
+                    len(turn.vanguards) >= VANGUARD_CORE_GUARDS
+                    and len(turn.rangers) >= RANGER_CORE_GUARDS
+                ),
+                compatibility_hold=self.compatibility_hold,
+                recovery_mode=self.recovery_mode,
+                combat_pressure=self.combat_pressure_active,
+                threat_level=self.threat_assessment.level,
+                enemies=enemies,
+                obstacles=frozenset(context.obstacles),
+                blocked_cells=frozenset(self._core_blocked_cells(turn, context)),
+                danger_cells=frozenset(context.danger_cells),
+                friendly_counts=dict(context.friendly_counts),
+            )
+        )
+        self.last_shadow_migration = replace(
+            self.last_shadow_migration,
+            authoritative_rechecks=self.shadow_migration_rechecks,
+        )
 
         workers = sorted(turn.workers, key=_uuid_sort_key)
         self.worker_modes.clear()
@@ -4033,7 +4213,9 @@ class CoreFarmer:
         candidates = sorted(turn.vanguards, key=_uuid_sort_key)[VANGUARD_CORE_GUARDS:]
         candidate_ids = {unit.id for unit in candidates}
         ready = bool(
-            self.strategic_parameters.posture is StrategicPosture.CONTEST
+            self.beacon_policy == "pursue"
+            and self.strategic_parameters.beacon_mode.value == "PRIMARY"
+            and self.strategic_parameters.posture is StrategicPosture.CONTEST
             and self.strategic_parameters.beacon_priority >= 7
             and combat_target is None
             and core is not None
@@ -4810,8 +4992,7 @@ class CoreFarmer:
         can_spawn = (
             not self.compatibility_hold
             and context.friendly_counts[core.position] < 2
-            and population
-            < max(ABSOLUTE_POPULATION_LIMIT, self.strategic_parameters.population_limit)
+            and population < self.strategic_parameters.production_ceiling
         )
         nearest_threat = min(
             (
@@ -4819,6 +5000,11 @@ class CoreFarmer:
                 for enemy in retreat_enemies
             ),
             default=None,
+        )
+        emergency_can_spawn = (
+            not self.compatibility_hold
+            and context.friendly_counts[core.position] < 2
+            and population < EMERGENCY_PRODUCTION_CEILING
         )
         critical_core = core.shield == 0 and core.hp <= 2
         projected_nonfatal_hp_damage = (
@@ -4901,7 +5087,7 @@ class CoreFarmer:
                 len(turn.vanguards) < EMERGENCY_VANGUARD_TARGET
                 or post_combat_vanguard
             )
-            and (can_spawn or post_combat_vanguard)
+            and (emergency_can_spawn or post_combat_vanguard)
             and (
                 production_budget.resources >= production_budget.vanguard_cost
                 or post_combat_vanguard
@@ -4920,7 +5106,7 @@ class CoreFarmer:
                 len(turn.rangers) < EMERGENCY_RANGER_TARGET
                 or post_combat_ranger
             )
-            and (can_spawn or post_combat_ranger)
+            and (emergency_can_spawn or post_combat_ranger)
             and (
                 production_budget.resources >= production_budget.ranger_cost
                 or post_combat_ranger
@@ -4951,11 +5137,7 @@ class CoreFarmer:
                 and direct_core_threat
                 and turn.resource_space <= OVERFLOW_SAFETY_PADDING
                 and production_budget.resources >= production_budget.vanguard_cost
-                and population
-                < max(
-                    ABSOLUTE_POPULATION_LIMIT,
-                    self.strategic_parameters.population_limit,
-                )
+                and emergency_can_spawn
             ):
                 core.spawn(UnitType.VANGUARD)
                 return
@@ -5061,7 +5243,7 @@ class CoreFarmer:
             )
             if (
                 strategic_unit is not None
-                and population < self.strategic_parameters.population_limit
+                and population < self.strategic_parameters.production_ceiling
                 and len(turn.workers) >= self.worker_target
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) >= DEFENSE_RANGER_TARGET
@@ -5500,7 +5682,8 @@ def _systemd_status(turn: Turn, tactic: CoreFarmer, accepted_tick: int) -> str:
         f"beacon_policy {tactic.beacon_policy}; "
         f"strategy_posture {tactic.strategic_parameters.posture.value}; "
         f"strategy_source {tactic.strategic_parameters.source}; "
-        f"strategy_population_limit {tactic.strategic_parameters.population_limit}; "
+        f"strategy_production_ceiling {tactic.strategic_parameters.production_ceiling}; "
+        f"strategy_population_health {tactic.strategic_parameters.population_health.value}; "
         f"compatibility_hold {int(tactic.compatibility_hold)}; "
         f"tuning_generation {tuning_generation}"
     )
@@ -5816,7 +5999,8 @@ def play(
                         f"beacon_policy={tactic.beacon_policy} "
                         f"strategy_posture={tactic.strategic_parameters.posture.value} "
                         f"strategy_source={tactic.strategic_parameters.source} "
-                        f"strategy_population_limit={tactic.strategic_parameters.population_limit} "
+                        f"strategy_production_ceiling={tactic.strategic_parameters.production_ceiling} "
+                        f"strategy_population_health={tactic.strategic_parameters.population_health.value} "
                         f"strategy_adviser={tactic.strategic_controller.adviser.last_outcome if tactic.strategic_controller.adviser else 'disabled'} "
                         f"tuning_generation={os.environ.get('ARENA_TUNING_GENERATION', '0').strip() or '0'} "
                         f"core_hp={turn.core.hp if turn.core else 'none'} "

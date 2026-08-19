@@ -21,6 +21,15 @@ IDs, authorization headers, model prompts, model responses, or raw logs.
 SQLite. SQLite uses WAL mode. Detailed snapshots and events are retained for 7
 days; hourly aggregates are retained for 90 days.
 
+Observation schema v4 includes an aggregate `strategy.migration_shadow` summary.
+It is diagnostic only: `SHADOW_ONLY` or `READY` never submits `START_MOVE`. The
+summary contains bounded status, deterministic block reasons, candidate counts,
+reserve/escort/cargo/abort readiness, the four restricted Ticks per Core cell,
+authoritative migration recheck count, and a bounded score. It excludes candidate
+coordinates, directions, routes,
+object IDs, Unit IDs, and escort assignments. Legacy v2/v3 observations remain
+readable with an unavailable migration-shadow default.
+
 ## Process isolation
 
 The deployment creates these identities and paths:

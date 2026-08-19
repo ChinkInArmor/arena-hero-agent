@@ -5,6 +5,7 @@ import io
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from collections import deque
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -14,6 +15,7 @@ from uuid import UUID
 from arena_hero import (
     Accepted,
     CommandPlan,
+    CoreState,
     Direction,
     PlayerState,
     Received,
@@ -22,7 +24,13 @@ from arena_hero import (
     unit_cost,
 )
 
-from arena_strategy import StrategicParameters, StrategicPosture
+from arena_strategy import (
+    BeaconPriority,
+    PopulationHealth,
+    StrategicParameters,
+    StrategicPosture,
+    StrategicState,
+)
 
 from arena_farmer import (
     CoreFarmer,
@@ -32,6 +40,8 @@ from arena_farmer import (
     ThreatLevel,
     _emit_resource_ledger,
     _enemy_threat_cells,
+    ShadowMigrationContext,
+    evaluate_shadow_migration,
     _is_turn_scoped_api_error,
     _manual_override_summary,
     _notify_systemd,
@@ -886,6 +896,103 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertIn((1, 1), danger)
         self.assertNotIn((2, 2), danger)
         self.assertNotIn((3, 3), danger)
+
+    def test_shadow_migration_returns_a_read_only_candidate(self) -> None:
+        turn = make_turn(
+            core_position=(0, 0),
+            beacon_position=(4, 0),
+            units=[
+                unit(WORKER_1, "WORKER", (5, 5), cargo=0),
+                unit(VANGUARD_1, "VANGUARD", (2, 2)),
+                unit(RANGER_1, "RANGER", (3, 3)),
+            ],
+        )
+        core = turn.core
+        self.assertIsNotNone(core)
+        context = ShadowMigrationContext(
+            tick=100,
+            core_position=(0, 0),
+            core_state=CoreState.NORMAL,
+            strategic_state="BEACON_CONTEST",
+            beacon_position=(4, 0),
+            resources=20,
+            resource_space=20,
+            cargo_on_core=False,
+            cargo_waiting=False,
+            escort_sufficient=True,
+            compatibility_hold=False,
+            recovery_mode=False,
+            combat_pressure=False,
+            threat_level=ThreatLevel.NORMAL,
+            enemies=(),
+            obstacles=frozenset(),
+            blocked_cells=frozenset(),
+            danger_cells=frozenset(),
+            friendly_counts={(0, 0): 1},
+        )
+        result = evaluate_shadow_migration(context)
+        self.assertTrue(result.eligible)
+        self.assertEqual(result.recommendation, "SHADOW_ONLY")
+        self.assertEqual(result.candidate_count, 4)
+        self.assertEqual(result.direction, Direction.RIGHT)
+        self.assertIsNone(turn.plan.model_dump(mode="json", exclude_none=True).get("core_action"))
+
+    def test_shadow_migration_rechecks_authoritative_move_results(self) -> None:
+        tactic = CoreFarmer(beacon_policy="hold")
+        turn = make_turn(
+            tick=100,
+            events=[
+                {
+                    "event_id": "30000000-0000-4000-8000-000000000100",
+                    "tick": 99,
+                    "event_type": "CORE_MOVE_FAILED",
+                    "actor_id": CORE_ID,
+                }
+            ],
+        )
+        tactic.choose_actions(turn)
+        self.assertEqual(tactic.shadow_migration_rechecks, 1)
+        self.assertEqual(
+            tactic.last_shadow_migration.authoritative_rechecks,
+            1,
+        )
+        self.assertNotIn(
+            "START_MOVE",
+            {action["type"] for action in turn.plan.model_dump(mode="json", exclude_none=True).get("unit_actions", {}).values()},
+        )
+
+    def test_shadow_migration_rejects_tactical_cargo_and_reserve_conditions(self) -> None:
+        base = ShadowMigrationContext(
+            tick=100,
+            core_position=(0, 0),
+            core_state=CoreState.NORMAL,
+            strategic_state="GROW_ECONOMY",
+            beacon_position=(10, 0),
+            resources=20,
+            resource_space=20,
+            cargo_on_core=False,
+            cargo_waiting=False,
+            escort_sufficient=True,
+            compatibility_hold=False,
+            recovery_mode=False,
+            combat_pressure=False,
+            threat_level=ThreatLevel.NORMAL,
+            enemies=(),
+            obstacles=frozenset(),
+            blocked_cells=frozenset(),
+            danger_cells=frozenset(),
+            friendly_counts={(0, 0): 1},
+        )
+        for changes, blocker in (
+            ({"cargo_on_core": True}, "CARGO_ON_CORE"),
+            ({"cargo_waiting": True}, "CARGO_WAITING"),
+            ({"resources": 9}, "RESOURCE_RESERVE"),
+            ({"escort_sufficient": False}, "INSUFFICIENT_ESCORT"),
+            ({"combat_pressure": True}, "TACTICAL_THREAT"),
+        ):
+            result = evaluate_shadow_migration(replace(base, **changes))
+            self.assertFalse(result.eligible)
+            self.assertIn(blocker, result.blockers)
 
     def test_core_moves_toward_beacon_and_avoids_resource_cells(self) -> None:
         direct = plan(make_turn(beacon_position=(3, 0)))
@@ -3327,8 +3434,7 @@ class CoreFarmerTests(unittest.TestCase):
         ready = make_turn(tick=131, resources=95, units=units)
         tactic.choose_actions(ready)
         queued = ready.plan.model_dump(mode="json", exclude_none=True)
-        self.assertEqual(queued["core_action"]["type"], "SPAWN")
-        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(queued["core_action"]["type"], "WAIT")
 
     def test_full_storage_growth_clears_cargo_from_core_before_spawning(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
@@ -3353,8 +3459,7 @@ class CoreFarmerTests(unittest.TestCase):
             queued["unit_actions"][WORKER_1],
             {"type": "MOVE", "direction": "RIGHT"},
         )
-        self.assertEqual(queued["core_action"]["type"], "SPAWN")
-        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(queued["core_action"]["type"], "WAIT")
 
     def test_optional_growth_does_not_bypass_blocking_before_storage_is_full(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
@@ -3426,6 +3531,52 @@ class CoreFarmerTests(unittest.TestCase):
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
         self.assertNotEqual(queued.get("core_action", {}).get("unit_type"), "WORKER")
 
+    def test_population_40_is_overextended_without_optional_spawn_or_reclamation(self) -> None:
+        workers = [
+            unit(
+                f"20000000-0000-4000-8000-{index:012x}",
+                "WORKER",
+                (20 + index, 20),
+                cargo=0,
+            )
+            for index in range(18)
+        ]
+        defenders = [
+            unit(
+                f"30000000-0000-4000-8000-{index:012x}",
+                "VANGUARD",
+                (40 + index, 20),
+            )
+            for index in range(10)
+        ] + [
+            unit(
+                f"40000000-0000-4000-8000-{index:012x}",
+                "RANGER",
+                (60 + index, 20),
+            )
+            for index in range(12)
+        ]
+        tactic = CoreFarmer(beacon_policy="hold")
+        for tick in range(100, 132):
+            tactic.economic_blocked_history.append((tick, False))
+            tactic.economic_deposit_history.append((tick, 20))
+        turn = make_turn(
+            tick=132,
+            resources=200,
+            population=40,
+            units=workers + defenders,
+        )
+        tactic.choose_actions(turn)
+        queued = turn.plan.model_dump(mode="json", exclude_none=True)
+
+        self.assertEqual(tactic.strategic_parameters.population_health, PopulationHealth.OVEREXTENDED)
+        self.assertEqual(tactic.strategic_parameters.production_ceiling, 24)
+        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertNotIn(
+            "SELF_DESTRUCT",
+            {action["type"] for action in queued["unit_actions"].values()},
+        )
+
     def test_saturated_population_24_opens_dynamic_growth(self) -> None:
         extra_workers = [
             unit(
@@ -3448,10 +3599,9 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertEqual(tactic.strategic_parameters.source, "local-expand")
-        self.assertEqual(tactic.strategic_parameters.population_limit, 30)
-        self.assertEqual(queued["core_action"]["type"], "SPAWN")
-        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(tactic.strategic_parameters.source, "local")
+        self.assertEqual(tactic.strategic_parameters.production_ceiling, 24)
+        self.assertEqual(queued["core_action"]["type"], "WAIT")
 
     def test_expansion_reserves_a_stable_scout_fraction(self) -> None:
         extra_workers = [
@@ -3473,11 +3623,8 @@ class CoreFarmerTests(unittest.TestCase):
         )
         tactic.choose_actions(turn)
 
-        self.assertEqual(tactic.strategic_parameters.source, "local-expand")
-        self.assertEqual(len(tactic.dedicated_scout_ids), 5)
-        self.assertTrue(
-            tactic.dedicated_scout_ids.isdisjoint(tactic.resource_intents)
-        )
+        self.assertNotEqual(tactic.strategic_parameters.source, "local-expand")
+        self.assertEqual(len(tactic.dedicated_scout_ids), 0)
 
     def test_emergency_defense_can_use_reserved_population_slot(self) -> None:
         extra_workers = [
@@ -3582,7 +3729,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(resolved)
         self.assertFalse(tactic.pending_conditional_spawn)
 
-    def test_population_25_is_absolute_spawn_boundary(self) -> None:
+    def test_population_25_is_not_a_global_spawn_boundary(self) -> None:
         extra_workers = [
             unit(
                 f"20000000-0000-4000-8000-{index:012x}",
@@ -3604,7 +3751,7 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertNotEqual(queued.get("core_action", {}).get("type"), "SPAWN")
+        self.assertEqual(queued.get("core_action", {}).get("type"), "SPAWN")
 
     def test_four_workers_accumulate_before_expanding_to_six(self) -> None:
         workers = [
@@ -5003,7 +5150,13 @@ class TerritorialCampaignTests(unittest.TestCase):
             worker_target=18,
             vanguard_target=6,
             ranger_target=8,
-            population_limit=32,
+            state=StrategicState.BEACON_CONTEST if posture is StrategicPosture.CONTEST else StrategicState.MILITARY_READY,
+            population_health=PopulationHealth.HEALTHY,
+            beacon_mode=BeaconPriority.PRIMARY if posture is StrategicPosture.CONTEST else BeaconPriority.DEFERRED,
+            economic_target=25,
+            military_target=32,
+            committed_population=26,
+            production_ceiling=32,
             economy_weight=5,
             territory_weight=8,
             combat_weight=7,
@@ -5028,8 +5181,8 @@ class TerritorialCampaignTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)["unit_actions"]
 
-        self.assertEqual(tactic.beacon_runner_id, UUID(VANGUARD_2))
-        self.assertEqual(queued[VANGUARD_2]["type"], "PICKUP_BEACON")
+        self.assertIsNone(tactic.beacon_runner_id)
+        self.assertNotEqual(queued[VANGUARD_2]["type"], "PICKUP_BEACON")
         self.assertNotEqual(queued[VANGUARD_1]["type"], "PICKUP_BEACON")
 
     def test_combat_pressure_disables_beacon_runner(self) -> None:

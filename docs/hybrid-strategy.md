@@ -12,14 +12,18 @@ The deterministic layer always owns:
 - compatibility hold, recovery, and plan submission;
 - the final decision when strategic advice is missing, stale, or invalid.
 
-The strategic layer owns only bounded parameters:
+The strategic layer owns only bounded preferences and deterministic local state:
 
-- posture: `CONSOLIDATE`, `EXPAND`, `CONTEST`, or `PRESSURE`;
-- Worker, Vanguard, and Ranger targets;
-- a population limit;
+- posture preference: `CONSOLIDATE`, `EXPAND`, `CONTEST`, or `PRESSURE`;
 - economy, territory, combat, safety, and Beacon weights;
 - the percentage of economic Workers biased toward exploration;
-- a decision TTL.
+- a decision TTL;
+- local `economic_target`, `military_target`, `committed_population`,
+  `production_ceiling`, and `population_health` diagnostics.
+
+The model adviser cannot set unit targets, production ceilings, migration commands,
+Beacon execution, self-destruction, emergency reserves, or action legality. The
+local deterministic controller retains those authorities.
 
 A model cannot return SDK actions, object identifiers, paths, prompts for later
 execution, or arbitrary configuration. Output with missing, additional, or
@@ -28,12 +32,13 @@ out-of-range fields is rejected as a whole.
 ## Deterministic Planner
 
 No model is required. The local planner starts with the validated 24-population
-profile and opens bounded growth only when it observes evidence such as saturated
-storage or a productive, low-congestion deposit window. It can mobilize a
-40-population control force when an enemy Core is visible. Validated model advice
-may select an overwhelm force up to 48 population, bounded to 18 Workers, 14
-Vanguards, and 16 Rangers. Beacon contesting remains gated by strategic evidence
-and deterministic safety checks.
+profile and opens growth only after a complete 32-Tick window shows productive,
+low-congestion deposits and at least two known resources. Storage saturation alone
+is not economic evidence. A visible enemy Core raises the military target without
+silently replacing the economic target. Existing population above the local
+production ceiling enters `OVEREXTENDED`: discretionary production freezes and
+Units are not automatically destroyed. Beacon contesting remains gated by the
+runtime Beacon policy, deterministic valuation, and safety checks.
 
 Resource assignment remains a deterministic minimum-cost matching problem.
 Path cost is dominant; resource density, return safety, territorial reach,
@@ -52,7 +57,9 @@ defense, local combat, healing, evasion, and compatibility hold.
 ## Optional Model Adviser
 
 The adviser is disabled by default. When enabled, a daemon worker sends only an
-aggregate strategic snapshot every 128-512 accepted Tick numbers. HTTP latency
+aggregate strategic snapshot every 128-512 accepted Tick numbers. It returns only
+allow-listed posture and weight preferences; the local population state and
+production ceiling are preserved when advice is applied. HTTP latency
 does not block the current Tick plan. A successful decision is valid for 128-1024
 Ticks; stale advice disappears automatically.
 

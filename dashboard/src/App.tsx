@@ -62,10 +62,33 @@ interface Observation {
     source: string;
     reason: string;
     valid_until_tick: number;
+    state: string;
+    population_health: string;
+    beacon_mode: string;
+    state_entered_tick: number;
+    state_dwell_ticks: number;
     worker_target: number;
     vanguard_target: number;
     ranger_target: number;
+    economic_target: number;
+    military_target: number;
+    committed_population: number;
+    production_ceiling: number;
     population_limit: number;
+    migration_shadow: {
+      enabled: boolean;
+      evaluated: boolean;
+      status: "NOT_EVALUATED" | "BLOCKED" | "READY";
+      reason: string;
+      candidate_count: number;
+      reserve_sufficient: boolean;
+      escort_sufficient: boolean;
+      cargo_safe: boolean;
+      abort_available: boolean;
+      restricted_ticks_per_cell: number;
+      score: number;
+      authoritative_rechecks: number;
+    };
     economy_weight: number;
     territory_weight: number;
     combat_weight: number;
@@ -325,7 +348,7 @@ function App() {
 
       <section className="metrics-band" aria-label="实时状态">
         <Metric icon={Wheat} label="资源" value={`${observation?.economy.resources ?? "--"} / ${observation?.economy.capacity ?? "--"}`} detail={`运输中 ${observation?.economy.cargo ?? "--"}`} tone="green" />
-        <Metric icon={Users} label="人口" value={observation?.population.total ?? "--"} detail={`上限 ${observation?.strategy.population_limit ?? "--"}`} tone="blue" />
+        <Metric icon={Users} label="人口" value={observation?.population.total ?? "--"} detail={`承诺 ${observation?.strategy.committed_population ?? "--"} · 生产 ${observation?.strategy.production_ceiling ?? observation?.strategy.population_limit ?? "--"}`} tone="blue" />
         <Metric icon={Swords} label="战斗编制" value={`${observation?.population.vanguards ?? "--"}V · ${observation?.population.rangers ?? "--"}R`} detail={`${observation?.population.workers ?? "--"} Worker`} tone="amber" />
         <Metric icon={Shield} label="Core" value={`${observation?.core.hp ?? "--"} HP · ${observation?.core.shield ?? "--"} SH`} detail={observation?.core.state ?? "--"} tone={observation?.core.alive ? "green" : "red"} />
         <Metric icon={Box} label="阻塞" value={(observation?.economy.delivery_blocked ?? 0) + (observation?.economy.resource_blocked ?? 0)} detail={`交付 ${observation?.economy.delivery_blocked ?? "--"} · 资源 ${observation?.economy.resource_blocked ?? "--"}`} tone={(observation?.economy.delivery_blocked ?? 0) > 0 ? "amber" : "neutral"} />
@@ -384,6 +407,7 @@ function App() {
             </div>
             <div className="source-line"><span>参数来源</span><b>{observation?.strategy.source ?? "--"}</b></div>
             <p className="reason">{reasonNames[observation?.strategy.reason ?? ""] ?? observation?.strategy.reason ?? "--"}</p>
+            <div className="source-line"><span>迁移影子</span><b>{observation?.strategy.migration_shadow?.status ?? "NOT_EVALUATED"}</b></div>
             <div className="weights">
               <Weight label="经济" value={observation?.strategy.economy_weight ?? 0} color="#56b884" />
               <Weight label="领土" value={observation?.strategy.territory_weight ?? 0} color="#668fbe" />
