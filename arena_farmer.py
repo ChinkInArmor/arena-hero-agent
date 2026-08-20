@@ -1974,7 +1974,11 @@ class CoreFarmer:
             for tick, blocked in self.economic_blocked_history
             if tick >= window_start
         )
-        return (
+        # A fully saturated stock skips the earnback/blocking window: any
+        # death then shrinks capacity and overflows the Core. Growth spends
+        # that dead margin before it can cascade.
+        storage_saturated = turn.resource_space == 0
+        return storage_saturated or (
             deposited >= GROWTH_EARNBACK_MULTIPLIER * next_worker_cost
             and blocked_ticks == 0
         )
@@ -4989,10 +4993,18 @@ class CoreFarmer:
             vanguard_cost=unit_cost(UnitType.VANGUARD, population),
             ranger_cost=unit_cost(UnitType.RANGER, population),
         )
+        # A saturated stock is exempt from the strategic production ceiling:
+        # with the Core at capacity any death shrinks capacity and overflows
+        # the Core, and spawning is the only way to spend the dead margin and
+        # grow capacity. The ceiling stays authoritative for normal production.
+        at_storage_cap = turn.resource_space == 0
         can_spawn = (
             not self.compatibility_hold
             and context.friendly_counts[core.position] < 2
-            and population < self.strategic_parameters.production_ceiling
+            and (
+                at_storage_cap
+                or population < self.strategic_parameters.production_ceiling
+            )
         )
         nearest_threat = min(
             (
@@ -5188,6 +5200,25 @@ class CoreFarmer:
                 not self.combat_pressure_active
                 and (nearest_threat is None or nearest_threat > 6)
             )
+            # Saturated-stock forced expansion: with the Core pinned exactly at
+            # the storage ceiling every death shrinks capacity and overflows it,
+            # and no deposit can ever free space. Spawn a Worker to spend the
+            # dead margin and grow capacity; this path is the only way out of
+            # the full-stock stall once worker/defender targets are met. It
+            # bypasses worker_target (already met) but keeps the emergency
+            # ceiling and the resource reserve as safe bounds. Strictly full
+            # stock (resource_space == 0) only, so an almost-full Core keeps
+            # respecting the blocking/earnback window.
+            saturated_expansion = (
+                turn.resource_space == 0
+                and population < EMERGENCY_PRODUCTION_CEILING
+                and production_budget.resources
+                >= production_budget.worker_cost + CORE_RESOURCE_RESERVE
+                and economic_expansion_is_safe
+            )
+            if saturated_expansion:
+                core.spawn(UnitType.WORKER)
+                return
             if (
                 len(turn.workers) < self.worker_target
                 and production_budget.resources >= expansion_threshold
@@ -5243,7 +5274,10 @@ class CoreFarmer:
             )
             if (
                 strategic_unit is not None
-                and population < self.strategic_parameters.production_ceiling
+                and (
+                    at_storage_cap
+                    or population < self.strategic_parameters.production_ceiling
+                )
                 and len(turn.workers) >= self.worker_target
                 and len(turn.vanguards) >= DEFENSE_VANGUARD_TARGET
                 and len(turn.rangers) >= DEFENSE_RANGER_TARGET

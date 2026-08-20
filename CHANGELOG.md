@@ -27,6 +27,16 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- A fully saturated Core (resources equal to capacity) no longer idles
+  forever: the saturated-stock short circuit in `_growth_is_ready` is
+  restored, the strategic production ceiling is waived while the stock sits
+  exactly at capacity, and a dedicated saturated-expansion branch spawns a
+  Worker to spend the dead margin and grow capacity (bounded by the
+  emergency ceiling and the resource reserve). Previously a full stock with
+  worker/defender targets already met would never spawn, and with an
+  OVEREXTENDED population above the production ceiling all production was
+  blocked, so a 190/190 stock stalled for hours until an external event
+  freed space.
 - Core delivery no longer deadlocks when a flushed Worker parks on the Core
   and every passable Core neighbor is packed two cargo Workers deep (the
   game limits the Core cell to one unit, so the resident had to vacate

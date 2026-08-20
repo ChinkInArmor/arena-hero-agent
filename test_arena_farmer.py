@@ -3263,10 +3263,12 @@ class CoreFarmerTests(unittest.TestCase):
         tactic.choose_actions(turn)
         queued = turn.plan.model_dump(mode="json", exclude_none=True)
 
-        self.assertNotEqual(
+        self.assertEqual(
             queued.get("core_action", {}).get("type"),
             "SPAWN",
+            msg="a saturated baseline stock must still spend the dead margin on a Worker",
         )
+        self.assertEqual(queued.get("core_action", {}).get("unit_type"), "WORKER")
         self.assertTrue(
             all(
                 action.get("type") != "SELF_DESTRUCT"
@@ -3424,17 +3426,18 @@ class CoreFarmerTests(unittest.TestCase):
 
         too_early = make_turn(tick=130, resources=95, units=units)
         tactic.choose_actions(too_early)
-        self.assertNotEqual(
-            too_early.plan.model_dump(mode="json", exclude_none=True)
-            .get("core_action", {})
-            .get("unit_type"),
-            "WORKER",
-        )
+        too_early_queued = too_early.plan.model_dump(mode="json", exclude_none=True)
+        # Saturated-stock protection is independent of the observation window:
+        # an at-capacity Core must spend the dead margin on a Worker in every
+        # tick, otherwise any death would overflow the Core.
+        self.assertEqual(too_early_queued.get("core_action", {}).get("type"), "SPAWN")
+        self.assertEqual(too_early_queued.get("core_action", {}).get("unit_type"), "WORKER")
 
         ready = make_turn(tick=131, resources=95, units=units)
         tactic.choose_actions(ready)
         queued = ready.plan.model_dump(mode="json", exclude_none=True)
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(queued["core_action"]["type"], "SPAWN")
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
 
     def test_full_storage_growth_clears_cargo_from_core_before_spawning(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
@@ -3459,7 +3462,12 @@ class CoreFarmerTests(unittest.TestCase):
             queued["unit_actions"][WORKER_1],
             {"type": "MOVE", "direction": "RIGHT"},
         )
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(
+            queued["core_action"]["type"],
+            "SPAWN",
+            msg="full storage must clear the cargo worker off the Core and spend the margin on a Worker",
+        )
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
 
     def test_optional_growth_does_not_bypass_blocking_before_storage_is_full(self) -> None:
         tactic = CoreFarmer(beacon_policy="hold")
@@ -3571,7 +3579,12 @@ class CoreFarmerTests(unittest.TestCase):
 
         self.assertEqual(tactic.strategic_parameters.population_health, PopulationHealth.OVEREXTENDED)
         self.assertEqual(tactic.strategic_parameters.production_ceiling, 24)
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(
+            queued["core_action"]["type"],
+            "SPAWN",
+            msg="saturated stock must spend the dead margin on a Worker instead of idling: any death at full capacity overflows the Core",
+        )
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
         self.assertNotIn(
             "SELF_DESTRUCT",
             {action["type"] for action in queued["unit_actions"].values()},
@@ -3601,7 +3614,12 @@ class CoreFarmerTests(unittest.TestCase):
 
         self.assertEqual(tactic.strategic_parameters.source, "local")
         self.assertEqual(tactic.strategic_parameters.production_ceiling, 24)
-        self.assertEqual(queued["core_action"]["type"], "WAIT")
+        self.assertEqual(
+            queued["core_action"]["type"],
+            "SPAWN",
+            msg="saturated stock must spend the dead margin on a Worker",
+        )
+        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
 
     def test_expansion_reserves_a_stable_scout_fraction(self) -> None:
         extra_workers = [
