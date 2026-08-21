@@ -5000,14 +5000,19 @@ class CoreFarmer:
         # A saturated stock is exempt from the strategic production ceiling:
         # with the Core at capacity any death shrinks capacity and overflows
         # the Core, and spawning is the only way to spend the dead margin and
-        # grow capacity. The ceiling stays authoritative for normal production.
+        # grow capacity. The exemption still respects the hard emergency
+        # ceiling so a saturated economy cannot grow past it: only the
+        # strategic (policy) ceiling is waived at full stock.
         at_storage_cap = turn.resource_space == 0
         can_spawn = (
             not self.compatibility_hold
             and context.friendly_counts[core.position] < 2
             and (
-                at_storage_cap
-                or population < self.strategic_parameters.production_ceiling
+                population < EMERGENCY_PRODUCTION_CEILING
+                and (
+                    at_storage_cap
+                    or population < self.strategic_parameters.production_ceiling
+                )
             )
         )
         nearest_threat = min(

@@ -37,6 +37,12 @@ All notable changes to this project will be documented in this file. The format 
   cannot keep growing miners beyond the available ore (previously a
   full stock grew Workers to 39 and mined the map dry while RANGERs sat
   at 2, then froze in STOCKPILE_HOLD at 250/250 with no ore left).
+- The saturated-stock exemption from the strategic production ceiling
+  is itself bounded by the hard emergency ceiling (EMERGENCY_PRODUCTION_
+  CEILING): at-storage-cap spawns could previously grow the population
+  past 48 via the strategic branch alone, so a full stock now stops
+  producing entirely once the population reaches the emergency ceiling
+  (observed live growing to 50/39W/7V/4R before this fix).
 - A fully saturated Core (resources equal to capacity) no longer idles
   forever: the saturated-stock short circuit in `_growth_is_ready` is
   restored, the strategic production ceiling is waived while the stock
