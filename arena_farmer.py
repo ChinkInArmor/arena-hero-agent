@@ -77,6 +77,10 @@ EARLY_DEFENSE_RANGER_TARGET = 1
 DEFENSE_VANGUARD_TARGET = BASELINE_VANGUARD_TARGET
 DEFENSE_RANGER_TARGET = BASELINE_RANGER_TARGET
 MAX_WORKER_TARGET = 19 - DEFENSE_VANGUARD_TARGET - DEFENSE_RANGER_TARGET
+# How far above the strategic worker target a saturated stock is allowed
+# to keep growing Workers. Ceiling-bounded headroom the scaling branch can
+# spend into even when all strategic targets are already met.
+SATURATED_GROWTH_HEADROOM = 6
 VANGUARD_GUARD_RADIUS = 3
 RANGER_GUARD_RADIUS = 2
 VANGUARD_CORE_GUARDS = 1
@@ -5202,11 +5206,14 @@ class CoreFarmer:
             )
             # Saturated-stock forced expansion: with the Core pinned exactly at
             # the storage ceiling every death shrinks capacity and overflows it,
-            # and no deposit can ever free space. Spawn a Worker to spend the
+            # Saturated-stock forced expansion: with the Core pinned exactly at
+            # the storage ceiling every death shrinks capacity and overflows it,
+            # and no deposit can ever free space. Spawn any unit to spend the
             # dead margin and grow capacity; this path is the only way out of
-            # the full-stock stall once worker/defender targets are met. It
-            # bypasses worker_target (already met) but keeps the emergency
-            # ceiling and the resource reserve as safe bounds. Strictly full
+            # the full-stock stall. Priority: rebalance strategic deficits
+            # (defenders first, then workers) so the fleet keeps a useful
+            # composition, then keep scaling population toward the production
+            # ceiling while the economy still has ore to mine. Strictly full
             # stock (resource_space == 0) only, so an almost-full Core keeps
             # respecting the blocking/earnback window.
             saturated_expansion = (
@@ -5217,8 +5224,57 @@ class CoreFarmer:
                 and economic_expansion_is_safe
             )
             if saturated_expansion:
-                core.spawn(UnitType.WORKER)
-                return
+                # Rebalance by marginal utility (deficit x weight / cost) so a
+                # full stock fills whichever wing -- worker or defender -- is
+                # actually short, instead of blindly adding miners (the
+                # pre-fix behavior that farmed Workers to 39 while RANGERs sat
+                # at 2). select_marginal_unit uses the strategic parameters'
+                # weights and targets, so it naturally retunes the fleet.
+                saturated_unit_name = select_marginal_unit(
+                    workers=len(turn.workers),
+                    vanguards=len(turn.vanguards),
+                    rangers=len(turn.rangers),
+                    worker_cost=production_budget.worker_cost,
+                    vanguard_cost=production_budget.vanguard_cost,
+                    ranger_cost=production_budget.ranger_cost,
+                    parameters=self.strategic_parameters,
+                    production_weights=self.production_weights_override,
+                )
+                if saturated_unit_name is not None:
+                    # Respect the hard ceiling on the worker pool: once the
+                    # worker ceiling is reached, a marginal WORKER pick is
+                    # suppressed in favour of scaling defenders instead, so a
+                    # full stock cannot keep growing the economy beyond ore.
+                    if saturated_unit_name != "WORKER" or len(turn.workers) < (
+                        self.worker_target + SATURATED_GROWTH_HEADROOM
+                    ):
+                        core.spawn(UnitType(saturated_unit_name))
+                        return
+                # Every strategic target is met and the worker pool is at its
+                # ceiling: keep investing the dead margin to grow population
+                # toward the emergency ceiling by scaling the defender wings
+                # (defenders are always useful, miners stop being so once ore
+                # is exhausted). Prefer the smaller wing so the composition
+                # stays balanced.
+                if population < EMERGENCY_PRODUCTION_CEILING:
+                    prefer_vanguard = (
+                        len(turn.vanguards) <= len(turn.rangers)
+                        and production_budget.resources
+                        >= CORE_RESOURCE_RESERVE + production_budget.vanguard_cost
+                    )
+                    prefer_ranger = (
+                        len(turn.vanguards) > len(turn.rangers)
+                        and production_budget.resources
+                        >= CORE_RESOURCE_RESERVE + production_budget.ranger_cost
+                    )
+                    if prefer_vanguard:
+                        core.spawn(UnitType.VANGUARD)
+                        return
+                    if prefer_ranger:
+                        core.spawn(UnitType.RANGER)
+                        return
+                # Fully saturated into every available bucket: hold -- the next
+                # death or capacity change re-opens the decision.
             if (
                 len(turn.workers) < self.worker_target
                 and production_budget.resources >= expansion_threshold

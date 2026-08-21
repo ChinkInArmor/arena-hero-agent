@@ -3582,9 +3582,13 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(
             queued["core_action"]["type"],
             "SPAWN",
-            msg="saturated stock must spend the dead margin on a Worker instead of idling: any death at full capacity overflows the Core",
+            msg="saturated stock must spend the dead margin instead of idling: any death at full capacity overflows the Core",
         )
-        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(
+            queued["core_action"]["unit_type"],
+            "VANGUARD",
+            msg="every strategic target is met, so the saturated stock keeps scaling the defender wings toward the emergency ceiling",
+        )
         self.assertNotIn(
             "SELF_DESTRUCT",
             {action["type"] for action in queued["unit_actions"].values()},
@@ -3617,9 +3621,13 @@ class CoreFarmerTests(unittest.TestCase):
         self.assertEqual(
             queued["core_action"]["type"],
             "SPAWN",
-            msg="saturated stock must spend the dead margin on a Worker",
+            msg="saturated stock must spend the dead margin instead of idling",
         )
-        self.assertEqual(queued["core_action"]["unit_type"], "WORKER")
+        self.assertEqual(
+            queued["core_action"]["unit_type"],
+            "VANGUARD",
+            msg="targets are all met, so the saturated stock keeps scaling defenders toward the emergency ceiling",
+        )
 
     def test_expansion_reserves_a_stable_scout_fraction(self) -> None:
         extra_workers = [

@@ -27,11 +27,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- The saturated-stock overflow valve no longer farms Workers
+  unconditionally: a full Core now rebalances by marginal utility
+  (deficit x weight / cost) so it fills whichever wing is actually short
+  (defenders first when RANGERs are depleted), and once every strategic
+  target is met it keeps scaling the defender wings to grow population
+  toward the emergency ceiling instead of idling at full stock. The
+  worker pool is capped at worker_target + 6 so a saturated economy
+  cannot keep growing miners beyond the available ore (previously a
+  full stock grew Workers to 39 and mined the map dry while RANGERs sat
+  at 2, then froze in STOCKPILE_HOLD at 250/250 with no ore left).
 - A fully saturated Core (resources equal to capacity) no longer idles
   forever: the saturated-stock short circuit in `_growth_is_ready` is
-  restored, the strategic production ceiling is waived while the stock sits
-  exactly at capacity, and a dedicated saturated-expansion branch spawns a
-  Worker to spend the dead margin and grow capacity (bounded by the
+  restored, the strategic production ceiling is waived while the stock
+  sits exactly at capacity, and a dedicated saturated-expansion branch
+  spawns a Worker to spend the dead margin and grow capacity (bounded by the
   emergency ceiling and the resource reserve). Previously a full stock with
   worker/defender targets already met would never spawn, and with an
   OVEREXTENDED population above the production ceiling all production was
